@@ -256,6 +256,18 @@ class CachedModel:
     checkpointed_at: float
 
 
+def _model_operation(model_id: str, operation: str, callback: Callable[[], Any]) -> Any:
+    """Apply a finite budget to model calls that return control to Python."""
+    started_at = time.monotonic()
+    result = callback()
+    elapsed = time.monotonic() - started_at
+    if elapsed > CONFIG.max_model_operation_seconds:
+        raise TimeoutError(
+            f"{model_id} {operation} took {elapsed:.1f}s; limit is {CONFIG.max_model_operation_seconds:.1f}s"
+        )
+    return result
+
+
 def _restore_uncheckpointed_learning(
     session: Session, task: ModuleType, registration, model: PickledModel, snapshot
 ) -> None:
@@ -274,7 +286,7 @@ def _restore_uncheckpointed_learning(
         snapshot.checkpoint_label_available_at if snapshot is not None else None,
         snapshot.checkpoint_event_sequence if snapshot is not None else None,
     ):
-        model.learn_one(features, y)
+        _model_operation(model.model_id, "learn", lambda features=features, y=y: model.learn_one(features, y))
 
 
 def _features(
@@ -367,14 +379,26 @@ def _learn_model(
     if supports_learning(model):
         label_features = _features(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
         for event_id, y, _, _ in labels:
-            model.learn_one(label_features[event_id], y)
+            _model_operation(
+                model.model_id,
+                "learn",
+                lambda event_id=event_id, y=y: model.learn_one(label_features[event_id], y),
+            )
     store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
     events = store.unpredicted_events(
         session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
     )
     prediction_features = _features(session, task.TASK_NAME, events, hot)
     predictions = [
-        (event_id, prediction_for(task, model, prediction_features[event_id], event_id)) for event_id in events
+        (
+            event_id,
+            _model_operation(
+                model.model_id,
+                "predict",
+                lambda event_id=event_id: prediction_for(task, model, prediction_features[event_id], event_id),
+            ),
+        )
+        for event_id in events
     ]
     inserted_predictions = set(store.add_predictions(session, task.TASK_NAME, model.model_id, predictions))
     raced_labels = [event_id for event_id, _ in predictions if event_id not in inserted_predictions]
