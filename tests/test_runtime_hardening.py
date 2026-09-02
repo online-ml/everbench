@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from everbench import artifacts
 from everbench.api import validation_examples
 from everbench.batching import TimedBatch
+from everbench.models import validate_uploaded_model
 from everbench.workers import _load_model
 
 
@@ -65,6 +66,12 @@ class RuntimeHardeningTest(unittest.TestCase):
             patch("everbench.api.archive.latest_labelled_examples", return_value=archived_rows),
         ):
             self.assertEqual(validation_examples(session, "task"), archived_rows + recent)
+
+    def test_upload_validation_accepts_a_task_without_labels(self) -> None:
+        task = SimpleNamespace(PROBLEM_TYPE="binary_classification", METRICS=())
+        payload = artifacts.dumps(ConstantModel())
+
+        self.assertEqual(validate_uploaded_model(cast(ModuleType, task), payload, artifacts.sign(payload), []), 0)
 
 
 if __name__ == "__main__":

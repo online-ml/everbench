@@ -114,15 +114,14 @@ def validate_uploaded_model(
     signature: str,
     examples: list[tuple[str, dict[str, float], object]],
 ) -> int:
-    """Check a signed upload against five labelled examples without mutating it.
+    """Check a signed upload against available labelled examples without mutating it.
 
     This deliberately lives alongside the model protocol: the validation is a
     generic protocol check, not a separate model subsystem.
     """
-    if len(examples) < 5:
-        raise ValueError("model validation requires at least five labelled examples")
-
     candidate = PickledModel("validation", copy.deepcopy(artifacts.loads(payload, signature)))
+    if not examples:
+        return 0
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     for event_id, features, y in examples[-5:]:
         prediction = prediction_for(task, candidate, features, event_id)
@@ -130,4 +129,4 @@ def validate_uploaded_model(
         if supports_learning(candidate):
             candidate.learn_one(features, y)
     tracker.values()
-    return 5
+    return min(len(examples), 5)
