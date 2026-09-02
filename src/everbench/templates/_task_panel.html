@@ -18,7 +18,7 @@
     <table class="leaderboard" {% if not leaderboard %}hidden{% endif %}>
       <thead>
         <tr>
-          <th>model</th><th>owner</th><th>predictions</th><th>labels</th><th>memory <span class="info" tabindex="0" role="img" aria-label="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory." data-tooltip="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory."></span></th>
+          <th>model</th><th>owner</th><th>predictions</th><th>labels</th><th>memory</th>
           {% for metric_name in metric_names %}<th>{{ metric_name }}</th>{% endfor %}
         </tr>
       </thead>
