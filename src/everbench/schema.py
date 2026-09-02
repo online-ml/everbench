@@ -1,0 +1,200 @@
+"""Canonical SQLAlchemy schema. Alembic owns changes to these tables."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any
+
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKeyConstraint,
+    Identity,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class BenchmarkEvent(Base):
+    __tablename__ = "benchmark_events"
+    __table_args__ = (UniqueConstraint("task_name", "sequence"),)
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+    features: Mapped[dict[str, float]] = mapped_column(JSON_TYPE)
+    inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BenchmarkLabel(Base):
+    __tablename__ = "benchmark_labels"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    y: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Prediction(Base):
+    __tablename__ = "benchmark_predictions"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    prediction: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
+    predicted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PredictionSkip(Base):
+    """Receipt for an event whose outcome arrived before prediction was possible."""
+
+    __tablename__ = "benchmark_prediction_skips"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    skipped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Training(Base):
+    __tablename__ = "benchmark_trainings"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ModelState(Base):
+    __tablename__ = "benchmark_model_state"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MetricState(Base):
+    """One operational metric checkpoint per (task, model)."""
+
+    __tablename__ = "benchmark_metric_state"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, nullable=False)
+    state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    predictions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    observations: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    values: Mapped[dict[str, float | None]] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MetricUpdate(Base):
+    """Receipt ensuring a prediction contributes to a metric exactly once."""
+
+    __tablename__ = "benchmark_metric_updates"
+    __table_args__ = (
+        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ModelRegistration(Base):
+    __tablename__ = "benchmark_models"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    artifact_id: Mapped[str | None] = mapped_column(String)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ModelArtifact(Base):
+    __tablename__ = "model_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    serializer: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    trusted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ModelSnapshot(Base):
+    __tablename__ = "model_snapshots"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    model_id: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(String, nullable=False)
+    checkpoint_label_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checkpoint_event_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ArchiveManifest(Base):
+    __tablename__ = "archive_manifest"
+
+    content_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_name: Mapped[str] = mapped_column(String, nullable=False)
+    event_date: Mapped[date] = mapped_column(Date, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    byte_size: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_name: Mapped[str | None] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

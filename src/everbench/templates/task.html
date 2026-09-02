@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}everbench — {{ task_name }}{% endblock %}
+{% block content %}
+  <h1><a href="{{ url_for('dashboard') }}">everbench</a> <span>/ {{ task_name }}</span></h1>
+  <div class="description">{{ task_description|safe }}</div>
+  {% include "_task_panel.html" %}
+  <section>
+    <h2>Archives</h2>
+    {% if archives %}
+      <ul class="archive-list">
+        {% for archive in archives %}
+          <li><a href="{{ url_for('download_archive', task_name=task_name, content_sha256=archive.content_sha256) }}">week of {{ archive.event_date.isoformat() }} · {{ archive.row_count|number }} records · {{ archive.byte_size|file_size if archive.byte_size is not none else archive.path|file_size }}</a></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No archives are available for this task.</p>
+    {% endif %}
+  </section>
+  <p class="updated" data-updated>updated 0s ago</p>
+  <script>
+    let updatedAt = Date.now();
+    const updated = document.querySelector('[data-updated]');
+
+    function updateAge() {
+      const seconds = Math.max(0, (Date.now() - updatedAt) / 1000);
+      updated.textContent = `updated ${seconds.toFixed(1)}s ago`;
+    }
+
+    document.body.addEventListener('htmx:afterSwap', event => {
+      if (event.detail.target.id === 'task-panel') {
+        updatedAt = Date.now();
+        updateAge();
+      }
+    });
+
+    document.addEventListener('click', event => {
+      const trigger = event.target.closest('[data-model-dialog]');
+      if (trigger) trigger.nextElementSibling.showModal();
+    });
+
+    setInterval(updateAge, 100);
+  </script>
+{% endblock %}

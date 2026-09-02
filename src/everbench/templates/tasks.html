@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}everbench — tasks{% endblock %}
+{% block content %}
+  <h1>everbench</h1>
+  <p class="introduction">Run live predict-then-learn benchmarks, inspect tasks, and manage models through the <a href="{{ url_for('api_documentation') }}">API documentation</a>.</p>
+  {% if tasks %}
+    <ul class="task-list">
+      {% for task in tasks %}
+        <li><a href="{{ url_for('task_dashboard', task_name=task) }}">{{ task }}</a></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No task has produced operational data yet.</p>
+  {% endif %}
+{% endblock %}

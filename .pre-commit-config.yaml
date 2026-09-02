@@ -1,0 +1,39 @@
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  # Keep the committed lockfile in sync with pyproject.toml.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.0
+    hooks:
+      - id: uv-lock
+
+  # These commands run the versions pinned in uv.lock, not a global tool.
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix --exit-non-zero-on-fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false

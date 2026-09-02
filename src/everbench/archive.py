@@ -1,0 +1,205 @@
+"""Archive completed benchmark rows to replayable Parquet files."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import io
+import json
+import os
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import boto3
+import pyarrow as pa
+import pyarrow.parquet as pq
+from sqlalchemy.orm import Session, sessionmaker
+
+from everbench import artifacts, store
+from everbench.config import CONFIG
+from everbench.metrics import MetricTracker
+from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
+
+
+def storage_configured() -> bool:
+    return CONFIG.s3_bucket_name is not None or CONFIG.archive_root is not None
+
+
+@lru_cache
+def _s3_client():
+    if not CONFIG.s3_bucket_name or not CONFIG.s3_endpoint_url:
+        raise RuntimeError("S3_BUCKET_NAME and S3_ENDPOINT_URL are required for R2 archive storage")
+    return boto3.client(
+        "s3",
+        endpoint_url=CONFIG.s3_endpoint_url,
+        region_name=CONFIG.s3_region,
+        aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY"),
+        verify=CONFIG.s3_ca_bundle,
+    )
+
+
+def _publish(task_name: str, week_start: str, content_sha256: str, payload: bytes) -> tuple[str, int]:
+    """Publish immutable archive bytes to R2, or a local development directory."""
+    if CONFIG.s3_bucket_name:
+        key = f"task={task_name}/week={week_start}/events-{content_sha256}.parquet"
+        _s3_client().put_object(
+            Bucket=CONFIG.s3_bucket_name, Key=key, Body=payload, ContentType="application/octet-stream"
+        )
+        return f"s3://{CONFIG.s3_bucket_name}/{key}", len(payload)
+    if CONFIG.archive_root is None:
+        raise RuntimeError("configure S3_BUCKET_NAME or EVERBENCH_ARCHIVE_ROOT for durable archives")
+    directory = CONFIG.archive_root / f"task={task_name}" / f"week={week_start}"
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / f"events-{content_sha256}.parquet"
+    if not output.exists():
+        temporary = output.with_suffix(".parquet.tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(output)
+    return str(output), output.stat().st_size
+
+
+def read_archive(location: str) -> bytes:
+    if location.startswith("s3://"):
+        bucket, key = location.removeprefix("s3://").split("/", 1)
+        if bucket != CONFIG.s3_bucket_name:
+            raise FileNotFoundError("archive is not in the configured R2 bucket")
+        return _s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+    return Path(location).read_bytes()
+
+
+def archive_size(location: str) -> int:
+    if location.startswith("s3://"):
+        bucket, key = location.removeprefix("s3://").split("/", 1)
+        if bucket != CONFIG.s3_bucket_name:
+            raise FileNotFoundError("archive is not in the configured R2 bucket")
+        return int(_s3_client().head_object(Bucket=bucket, Key=key)["ContentLength"])
+    return Path(location).stat().st_size
+
+
+def replay_archive(task: ModuleType, registration: Any, artifact: Any | None, path: Path | bytes) -> dict[str, Any]:
+    """Replay event and label availability in timestamp order.
+
+    An event creates a prediction at ``event_available_at``. Its label only
+    affects metrics and learning at ``label_available_at``. This preserves the
+    delayed-feedback semantics of the live benchmark rather than treating each
+    archived row as an immediately labelled example.
+    """
+    if registration.kind != "pickle" or artifact is None or not artifact.trusted:
+        raise ValueError("the registered model's trusted pickle upload is unavailable")
+    uploaded = artifacts.loads(artifact.payload, artifact.signature)
+    model = PickledModel(registration.model_id, copy.deepcopy(uploaded))
+
+    tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
+    parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
+    # Read archives made before the compact schema too.
+    feature_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
+    has_sequence = "event_sequence" in parquet.schema.names
+    columns = ["event_id", feature_column, "label", "event_available_at", "label_available_at"]
+    if has_sequence:
+        columns.append("event_sequence")
+
+    timeline: list[tuple[datetime, int, int, str, str, dict[str, float] | Any]] = []
+    fallback_sequence = 0
+    for batch in parquet.iter_batches(columns=columns):
+        for row in batch.to_pylist():
+            features = json.loads(row[feature_column])
+            sequence = int(row["event_sequence"]) if has_sequence else fallback_sequence
+            fallback_sequence += 1
+            event_id = row["event_id"]
+            event_at = datetime.fromisoformat(row["event_available_at"])
+            label_at = datetime.fromisoformat(row["label_available_at"])
+            if label_at < event_at:
+                raise ValueError(f"archive label for {event_id!r} became available before its event")
+            # Event actions sort before labels at exactly the same time.
+            timeline.append((event_at, 0, sequence, event_id, "event", features))
+            timeline.append((label_at, 1, sequence, event_id, "label", row["label"]))
+
+    predictions: dict[str, tuple[dict[str, float], Any]] = {}
+    for _, _, _, event_id, action, value in sorted(timeline):
+        if action == "event":
+            features = value
+            predictions[event_id] = (features, prediction_for(task, model, features, event_id))
+            tracker.predictions += 1
+            continue
+        features, prediction = predictions.pop(event_id)
+        target = value
+        tracker.update(target, prediction, lambda metric, y, prediction: metric_inputs_for(task, metric, y, prediction))
+        if supports_learning(model):
+            model.learn_one(features, target)
+    return {
+        "predictions": tracker.predictions,
+        "labels": tracker.observations,
+        "metrics": tracker.values(),
+    }
+
+
+def _record(row: dict) -> dict:
+    """Use JSON strings for task-varying payload/features while keeping tabular columns."""
+    return {
+        "event_id": row["event_id"],
+        # ``event_sequence`` makes same-timestamp replay deterministic. It is
+        # the durable ordering assigned when Everbench accepted the event.
+        "event_sequence": row["sequence"],
+        "event_available_at": row["inserted_at"].isoformat(),
+        "payload_json": json.dumps(row["features"], sort_keys=True, separators=(",", ":")),
+        "label": row["y"],
+        "label_reason": row["reason"],
+        "label_available_at": row["available_at"].isoformat(),
+    }
+
+
+def archive_once(sessions: sessionmaker[Session], task: ModuleType) -> int:
+    """Archive one eligible weekly partition batch, returning its event count.
+
+    Files have a deterministic content-hash name. A crash after file creation
+    and before committing the manifest can therefore be safely retried without
+    creating a duplicate replay dataset.
+    """
+    if not storage_configured():
+        raise RuntimeError("configure S3_BUCKET_NAME or EVERBENCH_ARCHIVE_ROOT for durable archives")
+    cutoff = datetime.now(UTC) - timedelta(days=CONFIG.archive_after_days)
+    with sessions() as session:
+        week_start = store.next_archive_week(session, task.TASK_NAME, cutoff)
+        if week_start is None:
+            return 0
+        rows = store.archive_rows(session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size)
+    if not rows:
+        return 0
+    records = [_record(row) for row in rows]
+    content_sha256 = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    buffer = io.BytesIO()
+    pq.write_table(pa.Table.from_pylist(records), buffer, compression="zstd")
+    location, byte_size = _publish(task.TASK_NAME, week_start.isoformat(), content_sha256, buffer.getvalue())
+    event_ids = [record["event_id"] for record in records]
+    with sessions.begin() as session:
+        store.record_archive(session, content_sha256, task.TASK_NAME, week_start, location, len(records), byte_size)
+        # The manifest commits with the delete, and only after the immutable
+        # file was atomically published. A failed cycle leaves source rows for
+        # the next periodic attempt.
+        store.purge_archived_events(session, task.TASK_NAME, event_ids)
+    return len(records)
+
+
+def latest_labelled_examples(manifests: list, limit: int = 5) -> list[tuple[str, dict[str, float], object]]:
+    """Read the last labelled records from Parquet manifests in event order."""
+    examples: list[tuple[str, dict[str, float], object]] = []
+    for manifest in manifests:
+        if len(examples) >= limit:
+            break
+        parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
+        # Archives written before the compact schema used ``features_json``;
+        # retain read compatibility while new files use ``payload_json``.
+        feature_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
+        for index in range(parquet.num_row_groups - 1, -1, -1):
+            rows = parquet.read_row_group(index, columns=["event_id", feature_column, "label"]).to_pylist()
+            for row in reversed(rows):
+                examples.append((row["event_id"], json.loads(row[feature_column]), row["label"]))
+                if len(examples) == limit:
+                    break
+            if len(examples) == limit:
+                break
+    return list(reversed(examples))

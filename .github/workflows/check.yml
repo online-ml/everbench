@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --locked --group dev
+
+      - name: Check formatting, linting, types, and the lockfile
+        run: uv run prek run --all-files
+
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v

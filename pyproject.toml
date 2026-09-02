@@ -1,0 +1,47 @@
+[project]
+name = "everbench"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "alembic>=1.14,<2",
+    "boto3>=1.35,<2",
+    "click>=8.1,<9",
+    "cloudpickle>=3.1,<4",
+    "flask>=3.1,<4",
+    "gunicorn>=23,<24",
+    "psycopg[binary]>=3.2,<4",
+    "pyarrow>=18,<20",
+    "python-dotenv>=1.0,<2",
+    "river>=0.23,<0.24",
+    "sqlalchemy>=2,<3",
+]
+
+[project.scripts]
+everbench = "everbench.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "prek>=0.5.2",
+    "ruff>=0.16.5",
+    "ty>=0.0.77",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# A focused baseline: correctness, import hygiene, modern syntax, and common
+# bug patterns. Additional rule families can be adopted deliberately later.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["everbench"]
+
+[tool.ty.environment]
+python-version = "3.11"
+root = ["src"]

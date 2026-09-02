@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}everbench — API{% endblock %}
+{% block content %}
+  <h1><a href="{{ url_for('dashboard') }}">everbench</a> <span>/ API</span></h1>
+  <div class="description">
+    <p>The API lets you upload a predictor, remove it, backtest it against a task archive, and inspect the Python environment.</p>
+  </div>
+
+  <section class="api-docs">
+    <h2>Authentication and model signatures</h2>
+    <p><code>EVERBENCH_API_KEY</code> is the required deployment-level password for every documented API route. Send its value as <code>X-API-Key</code>. It prevents unauthorised people from deleting models, running backtests, or inspecting the environment; it is unrelated to the model itself. <code>/api/health</code> remains unauthenticated solely for Railway health checks.</p>
+    <p>Every uploaded pickle must also carry an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. This is a separate trust check: pickle files can execute Python code when loaded, so Everbench only loads models signed with the private <code>EVERBENCH_MODEL_SIGNING_KEY</code>. To request the signing key, email <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a>, set it as <code>EVERBENCH_MODEL_SIGNING_KEY</code> in your local environment, then run <code>uv run everbench sign-model model.pkl</code>. Treat it as a secret: anyone holding it can submit a model that the server will unpickle.</p>
+  </section>
+
+  <section class="api-docs">
+    <h2>Upload a model</h2>
+    <dl class="api-list">
+      <div><dt><code>POST /api/tasks/&lt;task&gt;/models</code></dt><dd>Accepts multipart form data: a <code>model</code> pickle file, <code>model_id</code>, <code>owner</code>, and <code>class_definition</code>. The class definition is stored with the artifact and shown when someone clicks the model in the leaderboard. An optional <code>metadata</code> field contains a JSON object.</dd></div>
+    </dl>
+    <p>Everbench uses <a href="https://github.com/cloudpipe/cloudpickle">cloudpickle</a> to serialize model artifacts. This means an adapter class defined in your own upload module—such as one that calls Lift Wing—can travel with the pickle instead of being installed as trusted server code. A pickle must provide either <code>predict_one(features)</code>, <code>predict_proba_one(features)</code>, or <code>predict_event(event_id, features)</code>. <code>learn_one(features, y)</code> is optional: scoring-only predictors are evaluated normally but do not receive in-place updates. Before registration, Everbench verifies the HMAC signature, checks this protocol, deep-copies the model, and replays the five newest labelled archived examples. Uploads require at least five such examples.</p>
+    <pre><code>uv run everbench sign-model model.pkl
+curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
+  -H 'X-API-Key: …' \
+  -H 'X-Everbench-Artifact-Signature: …' \
+  -F 'model=@model.pkl' \
+  -F 'model_id=my-model' \
+  -F 'owner=your-name' \
+  -F 'class_definition=&lt;your_model.py'</code></pre>
+  </section>
+
+  <section class="api-docs">
+    <h2>Lift Wing revert risk</h2>
+    <p>Lift Wing is uploaded exactly like every other model. The <a href="https://meta.wikimedia.org/wiki/Machine_learning_models/Production/Language-agnostic_revert_risk">example adapter</a> is scoring-only: it uses each wiki revision ID and returns Lift Wing’s reversion probability. Build its pickle locally, sign it, then upload it to <code>wiki-leftwing</code> with the source file as <code>class_definition</code>.</p>
+    <pre><code>uv run python tasks/liftwing/liftwing_revertrisk.py --user-agent 'your-tool (you@example.com)'
+uv run everbench sign-model liftwing.pkl
+# Upload with the same multipart route shown above.</code></pre>
+  </section>
+
+  <section class="api-docs">
+    <h2>Delete a model</h2>
+    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> deactivates a model without removing its historical state.</p>
+  </section>
+
+  <section class="api-docs">
+    <h2>Backtest a model</h2>
+    <p><code>POST /api/tasks/&lt;task&gt;/models/&lt;model&gt;/backtest</code> replays one archive from the model’s original upload. It does not change the live model or its leaderboard metrics.</p>
+    <pre><code>POST /api/tasks/dummy/models/my-model/backtest
+{"archive_sha256":"the SHA-256 in the archive download link on the task page"}</code></pre>
+  </section>
+
+  <section class="api-docs">
+    <h2>Python environment</h2>
+    <p><code>GET /api/environment</code> returns the Python version and every installed package with its version, so you can build and pickle a compatible model.</p>
+  </section>
+{% endblock %}
