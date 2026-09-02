@@ -81,6 +81,25 @@ class PostgresLifecycleTest(unittest.TestCase):
             )
             self.assertIsNotNone(session.scalar(select(ArchiveManifest).where(ArchiveManifest.task_name == task_name)))
 
+    def test_task_stats_include_archives_and_exclude_orphan_labels(self) -> None:
+        task_name = f"stats-test-{uuid4()}"
+        with self.sessions.begin() as session:
+            store.add_events(session, task_name, [("live", datetime.now(UTC).timestamp(), {"value": 1.0})])
+            store.add_labels(session, task_name, [("live", 1, "test"), ("orphan", 1, "test")], delay_seconds=None)
+            session.add(
+                ArchiveManifest(
+                    content_sha256=uuid4().hex,
+                    task_name=task_name,
+                    event_date=datetime.now(UTC).date(),
+                    path="test.parquet",
+                    row_count=7,
+                    byte_size=1,
+                )
+            )
+
+        with self.sessions() as session:
+            self.assertEqual(store.task_stats(session, task_name), {"events": 8, "labels": 8})
+
     def test_failed_model_does_not_block_healthy_model(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "postgres-test-signing-key"
         task_name = f"model-test-{uuid4()}"

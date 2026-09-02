@@ -715,9 +715,13 @@ def task_stats(session: Session, task_name: str) -> dict[str, int]:
         session.execute(
             text(
                 """SELECT
-                 (SELECT COUNT(*) FROM benchmark_events WHERE task_name = :task_name) AS events,
-                 (SELECT COUNT(*) FROM benchmark_labels WHERE task_name = :task_name) AS labels,
-                 (SELECT COUNT(*) FROM benchmark_predictions WHERE task_name = :task_name) AS predictions"""
+                 (SELECT COUNT(*) FROM benchmark_events WHERE task_name = :task_name)
+                   + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS events,
+                 (SELECT COUNT(*)
+                    FROM benchmark_labels AS label
+                    JOIN benchmark_events AS event USING (task_name, event_id)
+                   WHERE label.task_name = :task_name)
+                   + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS labels"""
             ),
             {"task_name": task_name},
         )
