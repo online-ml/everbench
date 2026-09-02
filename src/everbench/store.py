@@ -736,6 +736,7 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       model.failure_count,
                       model.last_error,
                       model.failed_at,
+                      model.created_at,
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,

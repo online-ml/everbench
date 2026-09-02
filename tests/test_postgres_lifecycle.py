@@ -106,6 +106,7 @@ class PostgresLifecycleTest(unittest.TestCase):
             )
             leaderboard = {row["model_id"]: row for row in store.task_leaderboard(session, task_name)}
             self.assertGreater(leaderboard["working"]["model_bytes"], 0)
+            self.assertIsNotNone(leaderboard["working"]["created_at"])
 
     def test_stream_cursor_is_updated_atomically(self) -> None:
         task_name = f"cursor-test-{uuid4()}"
