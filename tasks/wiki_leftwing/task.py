@@ -1,8 +1,8 @@
 """Task definition for predicting whether English Wikipedia edits are reverted.
 
-Run it through the generic harness, rather than directly:
+Run it through the generic harness:
 
-    uv run everbench collect-events tasks/wiki_leftwing.py
+    uv run everbench debug worker tasks/wiki_leftwing/task.py
 """
 
 from __future__ import annotations

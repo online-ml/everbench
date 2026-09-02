@@ -20,6 +20,12 @@ REQUIRED_TASK_MEMBERS = (
     "METRICS",
     "DESCRIPTION_HTML",
 )
+TASK_FILENAME = "task.py"
+
+
+def task_paths(directory: str | Path) -> list[Path]:
+    """Return canonical task definitions, one per task directory."""
+    return sorted(Path(directory).glob(f"*/{TASK_FILENAME}"))
 
 
 def load_task(path: str | Path) -> ModuleType:
@@ -42,7 +48,7 @@ def load_task(path: str | Path) -> ModuleType:
 
 def load_task_named(task_name: str, directory: str | Path = "tasks") -> ModuleType:
     """Find a local task definition by its stable task name."""
-    for task_path in sorted(Path(directory).glob("*.py")):
+    for task_path in task_paths(directory):
         task = load_task(task_path)
         if task.TASK_NAME == task_name:
             return task
@@ -52,15 +58,16 @@ def load_task_named(task_name: str, directory: str | Path = "tasks") -> ModuleTy
 def discover_tasks(directory: str | Path = "tasks") -> list[ModuleType]:
     """Load every top-level task definition from ``directory``.
 
-    Supporting files can live in task subdirectories. Only top-level Python
-    files are benchmark definitions, which makes a deployment automatically
-    pick up a new task after its next restart.
+    Each immediate task directory contains one ``task.py`` definition and may
+    contain supporting files, such as uploadable model examples. This keeps a
+    deployment's task discovery explicit while picking up a new task after its
+    next restart.
     """
-    task_paths = sorted(Path(directory).glob("*.py"))
-    if not task_paths:
+    paths = task_paths(directory)
+    if not paths:
         raise LookupError(f"no task definitions found in {Path(directory)}")
 
-    tasks = [load_task(path) for path in task_paths]
+    tasks = [load_task(path) for path in paths]
     names = [task.TASK_NAME for task in tasks]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:

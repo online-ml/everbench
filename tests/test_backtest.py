@@ -31,7 +31,7 @@ class DelayedRate:
 class BacktestTimelineTest(unittest.TestCase):
     def test_labels_only_affect_the_model_when_they_become_available(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "test-signing-key"
-        task = load_task(Path(__file__).parents[1] / "tasks" / "dummy.py")
+        task = load_task(Path(__file__).parents[1] / "tasks" / "dummy" / "task.py")
         model = DelayedRate()
         payload = artifacts.dumps(model)
         signature = artifacts.sign(payload)

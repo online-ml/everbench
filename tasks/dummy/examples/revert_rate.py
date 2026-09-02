@@ -1,9 +1,4 @@
-"""A minimal online baseline for the dummy task.
-
-This is a user-side model definition, not code Everbench imports at runtime.
-It is included to preserve the original dummy baseline after the move to
-pickle-only model registrations.
-"""
+"""A minimal online baseline for the dummy task."""
 
 from __future__ import annotations
 

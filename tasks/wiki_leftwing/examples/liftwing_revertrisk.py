@@ -4,7 +4,7 @@ This file is deliberately outside Everbench's runtime. It is an ordinary
 user-owned model definition which cloudpickle embeds in ``liftwing.pkl``.
 
 Example:
-    uv run python tasks/liftwing/liftwing_revertrisk.py --user-agent 'name (email)'
+    uv run python tasks/wiki_leftwing/examples/liftwing_revertrisk.py --user-agent 'name (email)'
 """
 
 from __future__ import annotations

@@ -18,7 +18,6 @@ DESCRIPTION_HTML = """
 """
 PROBLEM_TYPE = "binary_classification"
 METRICS = (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
-# Required by the generic task contract. Local generators below take priority.
 EVENT_STREAM_URL = "memory://dummy-events"
 LABEL_STREAM_URL = "memory://dummy-labels"
 NEGATIVE_LABEL_DELAY_SECONDS = None
@@ -37,7 +36,7 @@ def event_stream(stop: Event) -> Iterator[dict]:
 
 def label_stream(stop: Event) -> Iterator[dict]:
     while not stop.is_set():
-        tick = _tick() - 6  # Three seconds after the event.
+        tick = _tick() - 6
         yield {"id": f"dummy:{tick}", "y": int(tick % 5 == 0)}
         stop.wait(0.5)
 
@@ -63,5 +62,5 @@ def metric_inputs_for(metric: object, y_true: int, prediction: float) -> tuple[b
 
 
 def label_for(event: dict) -> tuple[str, int, str] | None:
-    event_id = event.get("id")
-    return (event_id, int(event["y"]), "synthetic") if event_id is not None else None
+    identifier = event.get("id")
+    return (identifier, int(event["y"]), "synthetic") if identifier is not None else None

@@ -17,7 +17,7 @@ Set `DATABASE_URL` in `.env`. The file is ignored by Git.
 Run the benchmark worker in one terminal:
 
 ```bash
-uv run everbench debug worker tasks/wiki_leftwing.py
+uv run everbench debug worker tasks/wiki_leftwing/task.py
 ```
 
 Run the web server in another terminal:
@@ -48,7 +48,7 @@ To see the dashboard move without waiting for real-world labels, run the local
 synthetic task instead:
 
 ```bash
-uv run everbench debug worker tasks/dummy.py
+uv run everbench debug worker tasks/dummy/task.py
 ```
 
 ## Models
@@ -88,17 +88,18 @@ task-defined or server-installed model kinds. For the English Wikipedia task,
 the provided Lift Wing example is such a scoring-only model:
 
 ```bash
-uv run python tasks/liftwing/liftwing_revertrisk.py --user-agent 'your-tool (you@example.com)'
+uv run python tasks/wiki_leftwing/examples/liftwing_revertrisk.py --user-agent 'your-tool (you@example.com)'
 python sign_model.py liftwing.pkl
 ```
 
 It calls Wikimedia with the revision ID and treats the returned revert
 probability as its prediction. Upload it through the same multipart endpoint,
-passing `tasks/liftwing/liftwing_revertrisk.py` as `class_definition`.
+passing `tasks/wiki_leftwing/examples/liftwing_revertrisk.py` as `class_definition`.
 
 ## Tasks
 
-Task-specific code lives in `tasks/`. Copy `tasks/wiki_leftwing.py` to define
+Task-specific code lives in `tasks/<task>/task.py`; user-side model examples
+live next to it in `tasks/<task>/examples/`. Copy `tasks/wiki_leftwing/task.py` to define
 the stream URLs, event ID, frozen features, label extraction, `PROBLEM_TYPE`,
 and River `METRICS`. Supported problem types are `regression`,
 `binary_classification`, `multiclass_classification`, `clustering`, and
