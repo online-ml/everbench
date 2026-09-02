@@ -11,18 +11,8 @@
   </section>
 
   <section class="api-docs">
-    <h2>Endpoints</h2>
-    <dl class="api-list">
-      <div><dt><code>POST /api/tasks/&lt;task&gt;/models</code></dt><dd>Upload a signed model.</dd></div>
-      <div><dt><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code></dt><dd>Deactivate a model.</dd></div>
-      <div><dt><code>POST /api/tasks/&lt;task&gt;/models/&lt;model&gt;/backtest</code></dt><dd>Backtest against an archive.</dd></div>
-      <div><dt><code>GET /api/environment</code></dt><dd>List the server Python and packages.</dd></div>
-    </dl>
-  </section>
-
-  <section class="api-docs">
-    <h2>Upload</h2>
-    <p>Send multipart fields <code>model</code>, <code>model_id</code>, <code>owner</code>, and <code>class_definition</code>. Artifacts use <a href="https://github.com/cloudpipe/cloudpickle">cloudpickle</a> and must implement a prediction method; <code>learn_one</code> is optional.</p>
+    <h2>Upload a model</h2>
+    <p><code>POST /api/tasks/&lt;task&gt;/models</code> accepts multipart fields <code>model</code>, <code>model_id</code>, <code>owner</code>, and <code>class_definition</code>. Models are serialized with <a href="https://github.com/cloudpipe/cloudpickle">cloudpickle</a>.</p>
     <p>Save this standard-library script as <code>sign_model.py</code> in your model project:</p>
     <pre><code>import hashlib, hmac, os, sys
 from pathlib import Path
@@ -41,8 +31,19 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
   </section>
 
   <section class="api-docs">
+    <h2>Delete a model</h2>
+    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> deactivates a model.</p>
+  </section>
+
+  <section class="api-docs">
     <h2>Backtest a model</h2>
+    <p><code>POST /api/tasks/&lt;task&gt;/models/&lt;model&gt;/backtest</code> accepts an archive hash.</p>
     <pre><code>POST /api/tasks/dummy/models/my-model/backtest
 {"archive_sha256":"the SHA-256 in the archive download link on the task page"}</code></pre>
+  </section>
+
+  <section class="api-docs">
+    <h2>Python environment</h2>
+    <p><code>GET /api/environment</code> returns the server Python and package versions.</p>
   </section>
 {% endblock %}
