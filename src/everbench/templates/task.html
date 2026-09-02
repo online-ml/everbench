@@ -78,9 +78,9 @@
       if (event.detail.target.id === 'task-panel') {
         updatedAt = Date.now();
         updateAge();
-        updateRelativeTimes();
-        restoreSorting(event.detail.target);
       }
+      updateRelativeTimes();
+      restoreSorting();
     });
 
     document.addEventListener('click', event => {
