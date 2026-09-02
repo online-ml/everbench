@@ -141,7 +141,7 @@ def collect_events(
                 store.save_stream_cursor(session, task.TASK_NAME, "events", cursor)
         if cursor_state is not None and cursor is not None:
             cursor_state.value = cursor
-        logging.info("flushed %d/%d events", inserted, len(events))
+        logging.debug("flushed %d/%d events", inserted, len(events))
 
     batch = TimedBatch(CONFIG.ingest_batch_size, CONFIG.ingest_flush_seconds, flush, CONFIG.ingest_max_pending_items)
     with Heartbeat(sessions, task.TASK_NAME, "event-collector") if heartbeat else nullcontext():
@@ -209,7 +209,7 @@ def collect_labels(
             cursor_state.value = cursor
         if hot is not None:
             hot.mark_labelled([event_id for event_id, _, _ in labels])
-        logging.info("flushed %d/%d labels", inserted, len(labels))
+        logging.debug("flushed %d/%d labels", inserted, len(labels))
 
     batch = TimedBatch(CONFIG.ingest_batch_size, CONFIG.ingest_flush_seconds, flush, CONFIG.ingest_max_pending_items)
     with Heartbeat(sessions, task.TASK_NAME, "label-collector") if heartbeat else nullcontext():
