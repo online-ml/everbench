@@ -15,17 +15,22 @@
 
   <section>
     <h2>Leaderboard</h2>
-    <table class="leaderboard" {% if not leaderboard %}hidden{% endif %}>
+    <table class="leaderboard" data-sortable data-sort-table="leaderboard" {% if not leaderboard %}hidden{% endif %}>
       <thead>
         <tr>
-          <th>model</th><th>owner</th><th>predictions</th><th>labels</th><th>memory</th>
-          {% for metric_name in metric_names %}<th>{{ metric_name }}</th>{% endfor %}
+          <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="text">owner</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="number">predictions</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="number">labels</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="number">memory</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="date">uploaded</button></th>
+          {% for metric_name in metric_names %}<th><button class="sort-control" type="button" data-sort-type="number">{{ metric_name }}</button></th>{% endfor %}
         </tr>
       </thead>
       <tbody>
         {% for row in leaderboard %}
           <tr>
-            <td>
+            <td data-sort-value="{{ row.model_id }}">
               <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / {{ row.class_name }}">{{ row.model_id }}</button>
               <template>
                 {% if row.class_definition %}
@@ -42,8 +47,13 @@
                   {% if row.failed_at %}<p class="muted">last failure: {{ row.failed_at.isoformat() }}</p>{% endif %}
                 </template>
               {% endif %}
-            </td><td>{{ row.owner }}</td><td class="number">{{ row.predictions|number }}</td><td class="number">{{ row.labels|number }}</td><td class="number">{{ row.model_bytes|file_size }}</td>
-            {% for metric_name in metric_names %}<td class="number">{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
+            </td>
+            <td data-sort-value="{{ row.owner }}">{{ row.owner }}</td>
+            <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
+            <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
+            <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
+            <td class="number" data-sort-value="{{ row.created_at.isoformat() }}"><time data-relative-time datetime="{{ row.created_at.isoformat() }}"></time></td>
+            {% for metric_name in metric_names %}<td class="number" data-sort-value="{{ row.metrics.get(metric_name, '') }}">{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
           </tr>
         {% endfor %}
       </tbody>
