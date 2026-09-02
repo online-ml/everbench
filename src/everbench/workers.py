@@ -132,7 +132,7 @@ def collect_events(
     delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
     cursor_state = _cursor_state(sessions, task, "event_stream", "events")
 
-    def flush(items: list[tuple[tuple[str, float, dict, dict[str, float]] | None, str | None]]) -> None:
+    def flush(items: list[tuple[tuple[str, float, dict[str, float]] | None, str | None]]) -> None:
         events = [event for event, _ in items if event is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
@@ -159,8 +159,8 @@ def collect_events(
                 if event_id is not None:
                     event_time, features = _timestamp(task, event), task.features_for(event)
                     if hot is not None:
-                        hot.put_event(event_id, event_time, event, features)
-                    batch.add(((event_id, event_time, event, features), message.event_id))
+                        hot.put_event(event_id, features)
+                    batch.add(((event_id, event_time, features), message.event_id))
                 else:
                     batch.add((None, message.event_id))
         finally:
@@ -235,14 +235,12 @@ def _task_lock(task_name: str) -> int:
 
 
 def _load_model(session: Session, task: ModuleType, registration):
-    if registration.kind != "pickle":
-        raise RuntimeError(f"{registration.model_id} is not backed by a pickle artifact")
     snapshot = store.latest_snapshot(session, task.TASK_NAME, registration.model_id)
     artifact_record = store.artifact(session, snapshot.artifact_id) if snapshot is not None else None
     if artifact_record is None and registration.artifact_id:
         artifact_record = store.artifact(session, registration.artifact_id)
-    if artifact_record is None or not artifact_record.trusted:
-        raise RuntimeError(f"trusted pickle artifact missing for {registration.model_id}")
+    if artifact_record is None:
+        raise RuntimeError(f"pickle artifact missing for {registration.model_id}")
     return PickledModel(
         registration.model_id, artifacts.loads(artifact_record.payload, artifact_record.signature)
     ), snapshot
@@ -316,12 +314,7 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
     models = []
     for registration in registrations:
         definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
-        fingerprint = (
-            registration.kind,
-            registration.artifact_id,
-            tuple(sorted(registration.config.items())),
-            definition["fingerprint"],
-        )
+        fingerprint = (registration.artifact_id, definition["fingerprint"])
         cached = cache.get(registration.model_id)
         try:
             if cached is None or cached.fingerprint != fingerprint:

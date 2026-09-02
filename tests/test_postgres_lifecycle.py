@@ -52,7 +52,7 @@ class PostgresLifecycleTest(unittest.TestCase):
             store.add_events(
                 session,
                 task_name,
-                [(event_id, (datetime.now(UTC) - timedelta(days=2)).timestamp(), {"value": 1}, {"value": 1.0})],
+                [(event_id, (datetime.now(UTC) - timedelta(days=2)).timestamp(), {"value": 1.0})],
             )
             store.add_labels(session, task_name, [(event_id, 1, "test")], delay_seconds=None)
             session.add(Prediction(task_name=task_name, event_id=event_id, model_id="retired", prediction=0.5))
@@ -89,8 +89,8 @@ class PostgresLifecycleTest(unittest.TestCase):
             for model_id, model in (("broken", BrokenModel()), ("working", WorkingModel())):
                 payload = artifacts.dumps(model)
                 artifact = store.store_artifact(session, payload, artifacts.sign(payload), {})
-                store.register_model(session, task_name, model_id, "test", "pickle", {}, artifact.artifact_id)
-            store.add_events(session, task_name, [("event", datetime.now(UTC).timestamp(), {}, {"value": 1.0})])
+                store.register_model(session, task_name, model_id, "test", artifact.artifact_id)
+            store.add_events(session, task_name, [("event", datetime.now(UTC).timestamp(), {"value": 1.0})])
 
         with self.sessions.begin() as session:
             learn_once(session, cast(ModuleType, task))

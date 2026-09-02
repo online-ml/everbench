@@ -9,8 +9,6 @@ from threading import RLock
 
 @dataclass(frozen=True)
 class HotEvent:
-    event_time: float
-    payload: dict
     features: dict[str, float]
 
 
@@ -29,9 +27,9 @@ class HotStore:
         self._misses = 0
         self._lock = RLock()
 
-    def put_event(self, event_id: str, event_time: float, payload: dict, features: dict[str, float]) -> None:
+    def put_event(self, event_id: str, features: dict[str, float]) -> None:
         with self._lock:
-            self._events[event_id] = HotEvent(event_time, payload, features)
+            self._events[event_id] = HotEvent(features)
             self._events.move_to_end(event_id)
             self._trim()
 
@@ -39,9 +37,9 @@ class HotStore:
         with self._lock:
             event = self._events.get(event_id)
             if event is None:
-                self._events[event_id] = HotEvent(0.0, {}, features)
+                self._events[event_id] = HotEvent(features)
             else:
-                self._events[event_id] = HotEvent(event.event_time, event.payload, features)
+                self._events[event_id] = HotEvent(features)
             self._events.move_to_end(event_id)
             self._trim()
 

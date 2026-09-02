@@ -27,14 +27,19 @@ def main() -> None:
     configure_logging()
 
 
-@main.command("collect-events")
+@main.group()
+def debug() -> None:
+    """Run individual components for local diagnosis."""
+
+
+@debug.command("collect-events")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 def collect_events_command(task_file: str) -> None:
     """Collect events requiring predictions for TASK_FILE."""
     collect_events(make_session_factory(), load_task(task_file))
 
 
-@main.command("worker")
+@debug.command("worker")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 def worker(task_file: str) -> None:
     """Run a task's collectors and learner in one supervised process."""
@@ -73,14 +78,14 @@ def migrate() -> None:
         engine.dispose()
 
 
-@main.command("collect-labels")
+@debug.command("collect-labels")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 def collect_labels_command(task_file: str) -> None:
     """Collect labels and finalise delayed negatives for TASK_FILE."""
     collect_labels(make_session_factory(), load_task(task_file))
 
 
-@main.command()
+@debug.command()
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 @click.option("--once", is_flag=True, help="Run one learner cycle, then exit.")
 def learner(task_file: str, once: bool) -> None:
@@ -91,7 +96,7 @@ def learner(task_file: str, once: bool) -> None:
     run_learner(make_session_factory(), task, once)
 
 
-@main.command()
+@debug.command()
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 def report(task_file: str) -> None:
     """Print persisted River metrics for TASK_FILE."""
@@ -114,7 +119,7 @@ def api(host: str, port: int, debug: bool) -> None:
     create_app().run(host=host, port=port, debug=debug)
 
 
-@main.command("sign-model")
+@debug.command("sign-model")
 @click.argument("model_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def sign_model(model_file: Path) -> None:
     """Print the SHA-256 and required upload signature for a pickle file."""

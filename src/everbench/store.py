@@ -21,7 +21,6 @@ from everbench.schema import (
     ModelArtifact,
     ModelRegistration,
     ModelSnapshot,
-    ModelState,
     Prediction,
     PredictionSkip,
     StreamCursor,
@@ -33,7 +32,7 @@ from everbench.schema import (
 def add_events(
     session: Session,
     task_name: str,
-    events: list[tuple[str, float, dict, dict[str, float]]],
+    events: list[tuple[str, float, dict[str, float]]],
     delay_seconds: float | None = None,
 ) -> int:
     """Insert a collector batch in one statement and one transaction."""
@@ -44,10 +43,9 @@ def add_events(
             "task_name": task_name,
             "event_id": event_id,
             "event_time": datetime.fromtimestamp(timestamp, UTC),
-            "payload": payload,
             "features": features,
         }
-        for event_id, timestamp, payload, features in events
+        for event_id, timestamp, features in events
     ]
     statement = (
         insert(BenchmarkEvent)
@@ -71,7 +69,7 @@ def add_events(
             ),
             {
                 "task_name": task_name,
-                "event_ids": [event_id for event_id, _, _, _ in events],
+                "event_ids": [event_id for event_id, _, _ in events],
                 "delay_seconds": delay_seconds,
             },
         )
@@ -163,22 +161,6 @@ def save_stream_cursor(session: Session, task_name: str, stream_name: str, event
             index_elements=["task_name", "stream_name"], set_={"event_id": event_id, "updated_at": func.now()}
         )
     )
-
-
-def model_state(session: Session, task_name: str, model_id: str) -> dict[str, Any] | None:
-    row = session.get(ModelState, {"task_name": task_name, "model_id": model_id})
-    return row.state if row else None
-
-
-def save_model_state(session: Session, task_name: str, model_id: str, state: dict[str, Any]) -> None:
-    statement = (
-        insert(ModelState)
-        .values(task_name=task_name, model_id=model_id, state=state)
-        .on_conflict_do_update(
-            index_elements=["task_name", "model_id"], set_={"state": state, "updated_at": func.now()}
-        )
-    )
-    session.execute(statement)
 
 
 def untrained_labels(
@@ -488,14 +470,12 @@ def register_model(
     task_name: str,
     model_id: str,
     owner: str,
-    kind: str,
-    config: dict[str, Any],
-    artifact_id: str | None = None,
+    artifact_id: str,
 ) -> tuple[ModelRegistration, bool]:
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration:
-        if registration.kind != kind or registration.config != config or registration.artifact_id != artifact_id:
-            raise ValueError("model_id already has different kind or config; choose a new model_id")
+        if registration.artifact_id != artifact_id:
+            raise ValueError("model_id already has a different artifact; choose a new model_id")
         registration.owner = owner
         registration.active = True
         registration.failure_count = 0
@@ -509,8 +489,6 @@ def register_model(
         task_name=task_name,
         model_id=model_id,
         owner=owner,
-        kind=kind,
-        config=config,
         artifact_id=artifact_id,
         start_sequence=start_sequence,
     )
@@ -557,9 +535,7 @@ def model_registration(session: Session, task_name: str, model_id: str) -> Model
     return session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
 
 
-def store_artifact(
-    session: Session, payload: bytes, signature: str, metadata: dict[str, Any], trusted: bool = True
-) -> ModelArtifact:
+def store_artifact(session: Session, payload: bytes, signature: str, metadata: dict[str, Any]) -> ModelArtifact:
     checksum = artifacts.sha256(payload)
     artifact = session.scalar(select(ModelArtifact).where(ModelArtifact.sha256 == checksum))
     if artifact:
@@ -571,10 +547,8 @@ def store_artifact(
     artifact = ModelArtifact(
         artifact_id=str(uuid4()),
         sha256=checksum,
-        serializer="cloudpickle",
         payload=payload,
         signature=signature,
-        trusted=trusted,
         metadata_=metadata,
     )
     session.add(artifact)
@@ -597,9 +571,7 @@ def artifact(session: Session, artifact_id: str) -> ModelArtifact | None:
 
 def latest_snapshot(session: Session, task_name: str, model_id: str) -> ModelSnapshot | None:
     return session.scalar(
-        select(ModelSnapshot)
-        .where(ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id)
-        .order_by(ModelSnapshot.version.desc())
+        select(ModelSnapshot).where(ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id)
     )
 
 
@@ -652,7 +624,7 @@ def save_pickle_snapshot(
     """
     previous_artifact_id = session.scalar(
         select(ModelSnapshot.artifact_id).where(
-            ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id, ModelSnapshot.version == 1
+            ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id
         )
     )
     artifact_record = store_artifact(session, payload, artifacts.sign(payload), {"source": "worker-snapshot"})
@@ -661,13 +633,12 @@ def save_pickle_snapshot(
         .values(
             task_name=task_name,
             model_id=model_id,
-            version=1,
             artifact_id=artifact_record.artifact_id,
             checkpoint_label_available_at=checkpoint_label_available_at,
             checkpoint_event_sequence=checkpoint_event_sequence,
         )
         .on_conflict_do_update(
-            index_elements=["task_name", "model_id", "version"],
+            index_elements=["task_name", "model_id"],
             set_={
                 "artifact_id": artifact_record.artifact_id,
                 "checkpoint_label_available_at": checkpoint_label_available_at,
@@ -769,7 +740,7 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
                       COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
-                      COALESCE(artifact.metadata ->> 'class_name', model.kind) AS class_name
+                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id
@@ -817,7 +788,7 @@ def next_archive_week(session: Session, task_name: str, cutoff: datetime) -> dat
             f"""SELECT date_trunc('week', event.event_time AT TIME ZONE 'UTC')::date
                FROM benchmark_events AS event
                JOIN benchmark_labels AS label USING (task_name, event_id)
-               WHERE event.task_name = :task_name AND event.event_time < :cutoff AND event.archived_at IS NULL
+               WHERE event.task_name = :task_name AND event.event_time < :cutoff
                  AND NOT EXISTS (
                    SELECT 1 FROM benchmark_models AS model
                    WHERE model.task_name = event.task_name AND model.active
@@ -842,7 +813,6 @@ def archive_rows(
                WHERE event.task_name = :task_name
                  AND date_trunc('week', event.event_time AT TIME ZONE 'UTC')::date = :week_start
                  AND event.event_time < :cutoff
-                 AND event.archived_at IS NULL
                  AND NOT EXISTS (
                    SELECT 1 FROM benchmark_models AS model
                    WHERE model.task_name = event.task_name AND model.active

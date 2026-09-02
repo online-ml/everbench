@@ -17,7 +17,7 @@ Set `DATABASE_URL` in `.env`. The file is ignored by Git.
 Run the benchmark worker in one terminal:
 
 ```bash
-uv run everbench worker tasks/wiki_leftwing.py
+uv run everbench debug worker tasks/wiki_leftwing.py
 ```
 
 Run the web server in another terminal:
@@ -48,7 +48,7 @@ To see the dashboard move without waiting for real-world labels, run the local
 synthetic task instead:
 
 ```bash
-uv run everbench worker tasks/dummy.py
+uv run everbench debug worker tasks/dummy.py
 ```
 
 ## Models

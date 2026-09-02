@@ -38,10 +38,8 @@ class BenchmarkEvent(Base):
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
     event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
     features: Mapped[dict[str, float]] = mapped_column(JSON_TYPE)
     inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class BenchmarkLabel(Base):
@@ -83,6 +81,8 @@ class PredictionSkip(Base):
 
 
 class Training(Base):
+    """Receipt proving an online model has learned one labelled event."""
+
     __tablename__ = "benchmark_trainings"
     __table_args__ = (
         ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
@@ -92,17 +92,6 @@ class Training(Base):
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class ModelState(Base):
-    __tablename__ = "benchmark_model_state"
-
-    task_name: Mapped[str] = mapped_column(String, primary_key=True)
-    model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
 
 
 class MetricState(Base):
@@ -137,13 +126,13 @@ class MetricUpdate(Base):
 
 
 class ModelRegistration(Base):
+    """The per-task model identity, ownership, and operational status."""
+
     __tablename__ = "benchmark_models"
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
     owner: Mapped[str] = mapped_column(String, nullable=False)
-    kind: Mapped[str] = mapped_column(String, nullable=False)
-    config: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
     artifact_id: Mapped[str | None] = mapped_column(String)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -154,24 +143,25 @@ class ModelRegistration(Base):
 
 
 class ModelArtifact(Base):
+    """A content-addressed signed pickle plus its display metadata."""
+
     __tablename__ = "model_artifacts"
 
     artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
     sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    serializer: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     signature: Mapped[str] = mapped_column(String(64), nullable=False)
-    trusted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ModelSnapshot(Base):
+    """The single restart checkpoint for one model's learned state."""
+
     __tablename__ = "model_snapshots"
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    version: Mapped[int] = mapped_column(Integer, primary_key=True)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     checkpoint_label_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     checkpoint_event_sequence: Mapped[int | None] = mapped_column(BigInteger)
@@ -179,6 +169,8 @@ class ModelSnapshot(Base):
 
 
 class ArchiveManifest(Base):
+    """Index entry for an immutable Parquet archive stored outside Postgres."""
+
     __tablename__ = "archive_manifest"
 
     content_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)

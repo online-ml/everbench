@@ -28,8 +28,8 @@ class RuntimeHardeningTest(unittest.TestCase):
 
     def test_model_load_uses_the_task_name_for_snapshots(self) -> None:
         payload = artifacts.dumps(ConstantModel())
-        artifact = SimpleNamespace(payload=payload, signature=artifacts.sign(payload), trusted=True)
-        registration = SimpleNamespace(kind="pickle", model_id="constant", artifact_id="artifact")
+        artifact = SimpleNamespace(payload=payload, signature=artifacts.sign(payload))
+        registration = SimpleNamespace(model_id="constant", artifact_id="artifact")
         task = SimpleNamespace(TASK_NAME="example")
         with (
             patch("everbench.workers.store.latest_snapshot", return_value=None),

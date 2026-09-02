@@ -60,8 +60,6 @@ def registration_response(registration) -> dict[str, Any]:
         "task_name": registration.task_name,
         "model_id": registration.model_id,
         "owner": registration.owner,
-        "kind": registration.kind,
-        "config": registration.config,
         "artifact_id": registration.artifact_id,
         "active": registration.active,
         "start_sequence": registration.start_sequence,
@@ -285,7 +283,7 @@ def create_app() -> Flask:
             ) >= CONFIG.max_active_models_per_task:
                 raise ValueError(f"a task may have at most {CONFIG.max_active_models_per_task} active models")
             registration, created = store.register_model(
-                session, task_name, model_id.strip(), owner.strip(), "pickle", {}, artifact_record.artifact_id
+                session, task_name, model_id.strip(), owner.strip(), artifact_record.artifact_id
             )
             session.commit()
         except ValueError as error:

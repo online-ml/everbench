@@ -4,21 +4,10 @@ from __future__ import annotations
 
 import copy
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any
 
 from everbench import artifacts
 from everbench.metrics import MetricTracker
-
-
-class Predictor(Protocol):
-    model_id: str
-
-    def predict_one(self, features: dict[str, float]) -> Any: ...
-
-
-class OnlineModel(Predictor, Protocol):
-    def learn_one(self, features: dict[str, float], y: Any) -> None: ...
-    def state(self) -> dict[str, Any]: ...
 
 
 def prediction_for(task: ModuleType, model: Any, features: dict[str, float], event_id: str | None = None) -> Any:
@@ -94,9 +83,6 @@ class PickledModel:
         if learner is None:
             raise AttributeError("underlying model does not provide learn_one")
         learner(features, y)
-
-    def state(self) -> dict[str, Any]:
-        return {}
 
     def payload(self) -> bytes:
         return artifacts.dumps(self.model)
