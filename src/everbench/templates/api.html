@@ -7,7 +7,7 @@
   </div>
 
   <section class="api-docs">
-    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for the signing key, then create a signature with <code>uv run everbench sign-model model.pkl</code>.</p>
+    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for the signing key.</p>
   </section>
 
   <section class="api-docs">
@@ -23,10 +23,17 @@
   <section class="api-docs">
     <h2>Upload</h2>
     <p>Send multipart fields <code>model</code>, <code>model_id</code>, <code>owner</code>, and <code>class_definition</code>. Artifacts use <a href="https://github.com/cloudpipe/cloudpickle">cloudpickle</a> and must implement a prediction method; <code>learn_one</code> is optional.</p>
-    <pre><code>uv run everbench sign-model model.pkl
+    <p>Save this standard-library script as <code>sign_model.py</code> in your model project:</p>
+    <pre><code>import hashlib, hmac, os, sys
+from pathlib import Path
+
+payload = Path(sys.argv[1]).read_bytes()
+digest = hashlib.sha256(payload).hexdigest().encode()
+print(hmac.new(os.environ["EVERBENCH_MODEL_SIGNING_KEY"].encode(), digest, hashlib.sha256).hexdigest())</code></pre>
+    <pre><code>signature="$(python sign_model.py model.pkl)"
 curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
   -H 'X-API-Key: …' \
-  -H 'X-Everbench-Artifact-Signature: …' \
+  -H "X-Everbench-Artifact-Signature: $signature" \
   -F 'model=@model.pkl' \
   -F 'model_id=my-model' \
   -F 'owner=your-name' \

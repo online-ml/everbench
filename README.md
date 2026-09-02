@@ -57,10 +57,10 @@ Models are uploaded directly to a task as signed pickles. One request validates
 and registers the model:
 
 ```bash
-uv run everbench sign-model model.pkl
+signature="$(python sign_model.py model.pkl)"
 curl -X POST http://127.0.0.1:8000/api/tasks/wiki-leftwing/models \
   -H 'X-API-Key: …' \
-  -H 'X-Everbench-Artifact-Signature: …' \
+  -H "X-Everbench-Artifact-Signature: $signature" \
   -F 'model=@model.pkl' \
   -F 'model_id=my-model' \
   -F 'owner=your-name' \
@@ -72,7 +72,8 @@ Pickled models are supported only when signed with
 from arbitrary users. To request the signing key, email
 maxhalford25@gmail.com. Treat it as a secret: it grants the ability to submit
 Python code that the server will unpickle. Set the received value as
-`EVERBENCH_MODEL_SIGNING_KEY` locally before running `sign-model`. Everbench
+`EVERBENCH_MODEL_SIGNING_KEY` locally. The API page contains a reusable
+standard-library `sign_model.py` example. Everbench
 checks the online-learning protocol, deep-copies the model, and replays the
 five newest labelled archived examples before registering it. The dashboard
 links to the complete API documentation. Set a separate
@@ -88,7 +89,7 @@ the provided Lift Wing example is such a scoring-only model:
 
 ```bash
 uv run python tasks/liftwing/liftwing_revertrisk.py --user-agent 'your-tool (you@example.com)'
-uv run everbench sign-model liftwing.pkl
+python sign_model.py liftwing.pkl
 ```
 
 It calls Wikimedia with the revision ID and treats the returned revert
