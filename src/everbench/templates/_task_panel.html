@@ -18,7 +18,7 @@
     <table {% if not leaderboard %}hidden{% endif %}>
       <thead>
         <tr>
-          <th>model</th><th>owner</th><th>predictions</th><th>labels</th>
+          <th>model</th><th>owner</th><th>predictions</th><th>labels</th><th>memory <span class="info" tabindex="0" role="img" aria-label="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory." data-tooltip="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory."></span></th>
           {% for metric_name in metric_names %}<th>{{ metric_name }}</th>{% endfor %}
         </tr>
       </thead>
@@ -42,7 +42,7 @@
                   {% if row.failed_at %}<p class="muted">last failure: {{ row.failed_at.isoformat() }}</p>{% endif %}
                 </template>
               {% endif %}
-            </td><td>{{ row.owner }}</td><td>{{ row.predictions|number }}</td><td>{{ row.labels|number }}</td>
+            </td><td>{{ row.owner }}</td><td>{{ row.predictions|number }}</td><td>{{ row.labels|number }}</td><td>{{ row.model_bytes|file_size }}</td>
             {% for metric_name in metric_names %}<td>{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
           </tr>
         {% endfor %}

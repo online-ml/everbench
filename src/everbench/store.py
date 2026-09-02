@@ -739,12 +739,16 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
+                      COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes,
                       COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
                       COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id
                LEFT JOIN model_artifacts AS artifact ON artifact.artifact_id = model.artifact_id
+               LEFT JOIN model_snapshots AS snapshot
+                 ON snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
+               LEFT JOIN model_artifacts AS snapshot_artifact ON snapshot_artifact.artifact_id = snapshot.artifact_id
                WHERE model.task_name = :task_name
                ORDER BY model.model_id"""
         ),
