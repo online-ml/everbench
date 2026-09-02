@@ -115,13 +115,29 @@ result (for example an accuracy threshold versus a probability loss), define
 
 ## Deployment
 
-Run the worker and web server as separate Railway services, sharing the same
+Use two Railway services from this same GitHub repository, sharing the same
 Postgres database:
 
 ```bash
-uv run everbench worker tasks/wiki_leftwing.py
+uv run everbench worker-all
 uv run gunicorn --bind "0.0.0.0:${PORT:-8000}" 'everbench.api:create_app()'
 ```
+
+Set the first command as the Worker service's custom start command, and the
+second as the Web service's. Keep the Worker at one replica: it supervises one
+runtime for every top-level `tasks/*.py` file. Adding a task file and pushing
+to `main` therefore starts it automatically after Railway redeploys the
+worker; no Railway service needs to be created per task. The Web service is
+the only service that needs a public domain. Configure its healthcheck path as
+`/api/health`.
+
+Add a Railway Postgres service and expose its `DATABASE_URL` to both services.
+Set the shared secrets and R2 variables (`EVERBENCH_API_KEY`,
+`EVERBENCH_MODEL_SIGNING_KEY`, `S3_BUCKET_NAME`, `S3_ENDPOINT_URL`,
+`S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`) as Railway shared variables.
+Set `uv run alembic upgrade head` as a pre-deploy command on the Web service
+with a five-minute timeout. Enable GitHub autodeploys on `main` (and “Wait for
+CI” if available) for both services.
 
 The worker uses bounded in-memory write batches and resumes committed work from
 Postgres after restart. Set `EVERBENCH_ARCHIVE_ROOT` to durable, shared storage

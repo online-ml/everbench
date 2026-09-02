@@ -7,10 +7,13 @@ import os
 from pathlib import Path
 
 import click
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import text
 
+from alembic import command
 from everbench import artifacts, store
-from everbench.db import make_session_factory
-from everbench.tasks import load_task
+from everbench.db import make_engine, make_session_factory
+from everbench.tasks import discover_tasks, load_task
 from everbench.workers import collect_events, collect_labels
 
 
@@ -38,6 +41,36 @@ def worker(task_file: str) -> None:
     from everbench.runtime import run_task
 
     run_task(make_session_factory(), load_task(task_file))
+
+
+@main.command("worker-all")
+@click.option(
+    "--tasks-directory",
+    default="tasks",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+)
+def worker_all(tasks_directory: str) -> None:
+    """Run every top-level task definition in one supervised process."""
+    from everbench.runtime import run_tasks
+
+    run_tasks(make_session_factory(), discover_tasks(tasks_directory))
+
+
+@main.command()
+def migrate() -> None:
+    """Upgrade Postgres schema while holding the deployment-wide migration lock."""
+    root = Path(__file__).resolve().parents[2]
+    engine = make_engine()
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT pg_advisory_lock(hashtext('everbench:migrations'))"))
+            try:
+                command.upgrade(AlembicConfig(str(root / "alembic.ini")), "head")
+            finally:
+                connection.execute(text("SELECT pg_advisory_unlock(hashtext('everbench:migrations'))"))
+    finally:
+        engine.dispose()
 
 
 @main.command("collect-labels")

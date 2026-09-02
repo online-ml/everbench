@@ -47,3 +47,22 @@ def load_task_named(task_name: str, directory: str | Path = "tasks") -> ModuleTy
         if task.TASK_NAME == task_name:
             return task
     raise LookupError(f"no task definition found for {task_name!r}")
+
+
+def discover_tasks(directory: str | Path = "tasks") -> list[ModuleType]:
+    """Load every top-level task definition from ``directory``.
+
+    Supporting files can live in task subdirectories. Only top-level Python
+    files are benchmark definitions, which makes a deployment automatically
+    pick up a new task after its next restart.
+    """
+    task_paths = sorted(Path(directory).glob("*.py"))
+    if not task_paths:
+        raise LookupError(f"no task definitions found in {Path(directory)}")
+
+    tasks = [load_task(path) for path in task_paths]
+    names = [task.TASK_NAME for task in tasks]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"task names must be unique: {', '.join(duplicates)}")
+    return tasks
