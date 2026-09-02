@@ -10,6 +10,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+from time import perf_counter
 from types import ModuleType
 from typing import Any
 
@@ -18,7 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import artifacts, store
+from everbench import store
 from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
 from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
@@ -80,18 +81,15 @@ def archive_size(location: str) -> int:
     return Path(location).stat().st_size
 
 
-def replay_archive(task: ModuleType, registration: Any, artifact: Any | None, path: Path | bytes) -> dict[str, Any]:
-    """Replay event and label availability in timestamp order.
+def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
+    """Backtest an uploaded model against an archive.
 
     An event creates a prediction at ``event_available_at``. Its label only
     affects metrics and learning at ``label_available_at``. This preserves the
     delayed-feedback semantics of the live benchmark rather than treating each
     archived row as an immediately labelled example.
     """
-    if registration.kind != "pickle" or artifact is None or not artifact.trusted:
-        raise ValueError("the registered model's trusted pickle upload is unavailable")
-    uploaded = artifacts.loads(artifact.payload, artifact.signature)
-    model = PickledModel(registration.model_id, copy.deepcopy(uploaded))
+    model = PickledModel("backtest", copy.deepcopy(uploaded_model))
 
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
@@ -119,21 +117,32 @@ def replay_archive(task: ModuleType, registration: Any, artifact: Any | None, pa
             timeline.append((label_at, 1, sequence, event_id, "label", row["label"]))
 
     predictions: dict[str, tuple[dict[str, float], Any]] = {}
+    predict_seconds = 0.0
+    learn_seconds = 0.0
     for _, _, _, event_id, action, value in sorted(timeline):
         if action == "event":
             features = value
+            started_at = perf_counter()
             predictions[event_id] = (features, prediction_for(task, model, features, event_id))
+            predict_seconds += perf_counter() - started_at
             tracker.predictions += 1
             continue
         features, prediction = predictions.pop(event_id)
         target = value
         tracker.update(target, prediction, lambda metric, y, prediction: metric_inputs_for(task, metric, y, prediction))
         if supports_learning(model):
+            started_at = perf_counter()
             model.learn_one(features, target)
+            learn_seconds += perf_counter() - started_at
     return {
         "predictions": tracker.predictions,
         "labels": tracker.observations,
         "metrics": tracker.values(),
+        "timing_seconds": {
+            "predict": predict_seconds,
+            "learn": learn_seconds,
+            "total": predict_seconds + learn_seconds,
+        },
     }
 
 

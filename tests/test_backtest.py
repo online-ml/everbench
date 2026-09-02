@@ -4,7 +4,6 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -35,8 +34,7 @@ class BacktestTimelineTest(unittest.TestCase):
         task = load_task(Path(__file__).parents[1] / "tasks" / "dummy.py")
         model = DelayedRate()
         payload = artifacts.dumps(model)
-        artifact = SimpleNamespace(payload=payload, signature=artifacts.sign(payload), trusted=True)
-        registration = SimpleNamespace(kind="pickle", model_id="delayed-rate")
+        signature = artifacts.sign(payload)
         rows = [
             {
                 "event_id": "one",
@@ -58,7 +56,7 @@ class BacktestTimelineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "events.parquet"
             pq.write_table(pa.Table.from_pylist(rows), archive)
-            result = replay_archive(task, registration, artifact, archive)
+            result = replay_archive(task, artifacts.loads(payload, signature), archive)
 
         # Both predictions happen before the first label. The obsolete
         # row-at-a-time replay would learn the first label before predicting
@@ -66,6 +64,12 @@ class BacktestTimelineTest(unittest.TestCase):
         self.assertEqual(result["predictions"], 2)
         self.assertEqual(result["labels"], 2)
         self.assertEqual(result["metrics"]["Accuracy"], 0.5)
+        self.assertGreaterEqual(result["timing_seconds"]["predict"], 0.0)
+        self.assertGreaterEqual(result["timing_seconds"]["learn"], 0.0)
+        self.assertEqual(
+            result["timing_seconds"]["total"],
+            result["timing_seconds"]["predict"] + result["timing_seconds"]["learn"],
+        )
 
 
 if __name__ == "__main__":

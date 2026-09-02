@@ -37,9 +37,12 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
 
   <section class="api-docs">
     <h2>Backtest a model</h2>
-    <p><code>POST /api/tasks/&lt;task&gt;/models/&lt;model&gt;/backtest</code> accepts an archive hash.</p>
-    <pre><code>POST /api/tasks/dummy/models/my-model/backtest
-{"archive_sha256":"the SHA-256 in the archive download link on the task page"}</code></pre>
+    <p><code>POST /api/tasks/&lt;task&gt;/backtest</code> accepts a signed <code>model</code> pickle and <code>archive_sha256</code>. It does not register or change the model. The response contains final metrics and prediction/learning durations.</p>
+    <pre><code>curl -X POST http://127.0.0.1:8000/api/tasks/dummy/backtest \
+  -H 'X-API-Key: …' \
+  -H "X-Everbench-Artifact-Signature: $signature" \
+  -F 'model=@model.pkl' \
+  -F 'archive_sha256=the-SHA-256-in-the-archive-link'</code></pre>
   </section>
 
   <section class="api-docs">

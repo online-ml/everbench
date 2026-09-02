@@ -309,31 +309,36 @@ def create_app() -> Flask:
         session.commit()
         return jsonify(task_name=task_name, model_id=model_id, active=False)
 
-    @app.post("/api/tasks/<task_name>/models/<model_id>/backtest")
+    @app.post("/api/tasks/<task_name>/backtest")
     @require_api_key
-    def backtest_model(task_name: str, model_id: str) -> Response | tuple[Response, int]:
+    def backtest_model(task_name: str) -> Response | tuple[Response, int]:
+        """Run an uploaded signed model without registering or persisting it."""
         task = task_or_404(task_name)
-        payload = request.get_json(silent=True) or {}
-        archive_sha256 = payload.get("archive_sha256")
+        uploaded = request.files.get("model")
+        archive_sha256 = request.form.get("archive_sha256")
+        if uploaded is None:
+            return jsonify(error="multipart form field 'model' is required"), 400
         if not isinstance(archive_sha256, str) or not archive_sha256:
             return jsonify(error="archive_sha256 is required"), 400
+        payload = uploaded.read(CONFIG.max_model_bytes + 1)
+        signature = request.headers.get("X-Everbench-Artifact-Signature", "")
+        if not payload or len(payload) > CONFIG.max_model_bytes:
+            return jsonify(error=f"model must be between 1 and {CONFIG.max_model_bytes} bytes"), 413
+        try:
+            uploaded_model = artifacts.loads(payload, signature)
+        except RuntimeError as error:
+            return jsonify(error=str(error)), 503
+        except ValueError:
+            return jsonify(error="invalid model signature"), 400
         session = _session()
-        registration = store.model_registration(session, task_name, model_id)
-        if registration is None:
-            return jsonify(error="model not found"), 404
         manifest = store.task_archive(session, task_name, archive_sha256)
         if manifest is None:
             return jsonify(error="archive not found"), 404
         try:
-            result = archive.replay_archive(
-                task,
-                registration,
-                store.artifact(session, registration.artifact_id) if registration.artifact_id else None,
-                archive_bytes(manifest),
-            )
+            result = archive.replay_archive(task, uploaded_model, archive_bytes(manifest))
         except Exception as error:
             return jsonify(error=f"backtest failed: {error}"), 422
-        return jsonify(model_id=model_id, archive_sha256=manifest.content_sha256, **result)
+        return jsonify(archive_sha256=manifest.content_sha256, **result)
 
     return app
 
