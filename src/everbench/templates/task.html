@@ -4,6 +4,11 @@
   <h1><a href="{{ url_for('dashboard') }}">everbench</a> <span>/ {{ task_name }}</span></h1>
   <div class="description">{{ task_description|safe }}</div>
   {% include "_task_panel.html" %}
+  <dialog class="model-dialog" data-persistent-model-dialog>
+    <form method="dialog"><button class="dialog-close" aria-label="Close model dialog">×</button></form>
+    <h3 data-model-dialog-heading></h3>
+    <div data-model-dialog-content></div>
+  </dialog>
   <section>
     <h2>Archives</h2>
     {% if archives %}
@@ -35,7 +40,15 @@
 
     document.addEventListener('click', event => {
       const trigger = event.target.closest('[data-model-dialog]');
-      if (trigger) trigger.nextElementSibling.showModal();
+      if (!trigger) return;
+
+      const template = trigger.nextElementSibling;
+      if (!(template instanceof HTMLTemplateElement)) return;
+
+      const dialog = document.querySelector('[data-persistent-model-dialog]');
+      dialog.querySelector('[data-model-dialog-heading]').textContent = trigger.dataset.modelDialogHeading;
+      dialog.querySelector('[data-model-dialog-content]').replaceChildren(template.content.cloneNode(true));
+      if (!dialog.open) dialog.showModal();
     });
 
     setInterval(updateAge, 100);

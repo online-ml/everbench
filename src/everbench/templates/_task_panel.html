@@ -26,25 +26,21 @@
         {% for row in leaderboard %}
           <tr>
             <td>
-              <button class="model-name" type="button" data-model-dialog>{{ row.model_id }}</button>
-              <dialog class="model-dialog">
-                <form method="dialog"><button class="dialog-close" aria-label="Close model definition">×</button></form>
-                <h3>{{ row.model_id }} <span>/ {{ row.class_name }}</span></h3>
+              <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / {{ row.class_name }}">{{ row.model_id }}</button>
+              <template>
                 {% if row.class_definition %}
                   <pre><code>{{ row.class_definition }}</code></pre>
                 {% else %}
                   <p class="muted">The class definition was not recorded for this legacy model.</p>
                 {% endif %}
-              </dialog>
+              </template>
               {% if row.last_error %}
-                <button class="model-failure" type="button" data-model-dialog aria-label="Show model failure">!</button>
-                <dialog class="model-dialog model-failure-dialog">
-                  <form method="dialog"><button class="dialog-close" aria-label="Close model failure">×</button></form>
-                  <h3>{{ row.model_id }} <span>/ model failure</span></h3>
+                <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure">!</button>
+                <template>
                   <p>{% if row.active %}{{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}.{% else %}Deactivated after {{ row.failure_count }} consecutive failed cycles.{% endif %}</p>
                   <pre><code>{{ row.last_error }}</code></pre>
                   {% if row.failed_at %}<p class="muted">last failure: {{ row.failed_at.isoformat() }}</p>{% endif %}
-                </dialog>
+                </template>
               {% endif %}
             </td><td>{{ row.owner }}</td><td>{{ row.predictions|number }}</td><td>{{ row.labels|number }}</td>
             {% for metric_name in metric_names %}<td>{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
