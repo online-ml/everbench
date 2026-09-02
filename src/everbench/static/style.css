@@ -19,6 +19,7 @@ h2 { font-size: 14px; margin: 32px 0 8px; text-transform: uppercase; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px; text-align: left; vertical-align: top; }
 th { font-weight: 700; }
+.leaderboard td.number { text-align: right; }
 tbody tr:nth-child(odd) { background: #f3f3f3; }
 .model-name { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-decoration: underline; text-decoration-thickness: 1px; }
 .model-failure { width: 16px; height: 16px; margin-left: 5px; padding: 0; border: 1px solid #111; border-radius: 50%; background: #111; color: #fff; cursor: pointer; font: inherit; font-size: 11px; line-height: 14px; vertical-align: 1px; }

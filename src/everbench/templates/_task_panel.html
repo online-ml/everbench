@@ -15,7 +15,7 @@
 
   <section>
     <h2>Leaderboard</h2>
-    <table {% if not leaderboard %}hidden{% endif %}>
+    <table class="leaderboard" {% if not leaderboard %}hidden{% endif %}>
       <thead>
         <tr>
           <th>model</th><th>owner</th><th>predictions</th><th>labels</th><th>memory <span class="info" tabindex="0" role="img" aria-label="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory." data-tooltip="Serialized size of the latest saved model state. This is a stable proxy for model memory, not total Python process memory."></span></th>
@@ -42,8 +42,8 @@
                   {% if row.failed_at %}<p class="muted">last failure: {{ row.failed_at.isoformat() }}</p>{% endif %}
                 </template>
               {% endif %}
-            </td><td>{{ row.owner }}</td><td>{{ row.predictions|number }}</td><td>{{ row.labels|number }}</td><td>{{ row.model_bytes|file_size }}</td>
-            {% for metric_name in metric_names %}<td>{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
+            </td><td>{{ row.owner }}</td><td class="number">{{ row.predictions|number }}</td><td class="number">{{ row.labels|number }}</td><td class="number">{{ row.model_bytes|file_size }}</td>
+            {% for metric_name in metric_names %}<td class="number">{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
           </tr>
         {% endfor %}
       </tbody>
