@@ -22,7 +22,7 @@ from everbench.config import CONFIG
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
 from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
-from everbench.sse import subscribe
+from everbench.sse import StreamMessage, subscribe
 
 
 class Heartbeat(AbstractContextManager):
@@ -68,10 +68,42 @@ def _timestamp(task: ModuleType, event: dict) -> float:
     return float(extractor(event) if extractor else event.get("timestamp", time.time()))
 
 
-def _stream(task: ModuleType, source_name: str, stream_name: str, url: str, stop: threading.Event):
+@dataclass
+class StreamCursorState:
+    value: str | None
+
+
+def _stream(
+    task: ModuleType,
+    source_name: str,
+    stream_name: str,
+    url: str,
+    stop: threading.Event,
+    cursor_state: StreamCursorState | None,
+):
     """Use a task's local generator when supplied, otherwise subscribe to SSE."""
     source = getattr(task, source_name, None)
-    return source(stop) if source is not None else subscribe(stream_name, url, stop=stop)
+    if source is not None:
+        return (StreamMessage(payload=event, event_id=None) for event in source(stop))
+    if cursor_state is None:
+        raise RuntimeError("SSE streams require a durable cursor state")
+    return subscribe(stream_name, url, stop=stop, last_event_id=lambda: cursor_state.value)
+
+
+def _cursor_state(
+    sessions: sessionmaker[Session], task: ModuleType, source_name: str, stream_name: str
+) -> StreamCursorState | None:
+    if getattr(task, source_name, None) is not None:
+        return None
+    with sessions() as session:
+        return StreamCursorState(store.stream_cursor(session, task.TASK_NAME, stream_name))
+
+
+def _last_cursor(items: list[tuple[Any, str | None]]) -> str | None:
+    for _, event_id in reversed(items):
+        if event_id is not None:
+            return event_id
+    return None
 
 
 def _flush_before_exit(batch: TimedBatch[Any]) -> None:
@@ -98,10 +130,17 @@ def collect_events(
 ) -> None:
     stop = stop or threading.Event()
     delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
+    cursor_state = _cursor_state(sessions, task, "event_stream", "events")
 
-    def flush(events: list[tuple[str, float, dict, dict[str, float]]]) -> None:
+    def flush(items: list[tuple[tuple[str, float, dict, dict[str, float]] | None, str | None]]) -> None:
+        events = [event for event, _ in items if event is not None]
+        cursor = _last_cursor(items)
         with sessions.begin() as session:
             inserted = store.add_events(session, task.TASK_NAME, events, delay_seconds)
+            if cursor_state is not None and cursor is not None:
+                store.save_stream_cursor(session, task.TASK_NAME, "events", cursor)
+        if cursor_state is not None and cursor is not None:
+            cursor_state.value = cursor
         logging.info("flushed %d/%d events", inserted, len(events))
 
     batch = TimedBatch(CONFIG.ingest_batch_size, CONFIG.ingest_flush_seconds, flush, CONFIG.ingest_max_pending_items)
@@ -109,15 +148,21 @@ def collect_events(
         timer = threading.Thread(target=_flush_on_timer, args=(batch, stop), name="event-batch-flush", daemon=True)
         timer.start()
         try:
-            for event in _stream(task, "event_stream", f"{task.TASK_NAME}: events", task.EVENT_STREAM_URL, stop):
+            for message in _stream(
+                task, "event_stream", f"{task.TASK_NAME}: events", task.EVENT_STREAM_URL, stop, cursor_state
+            ):
+                event = message.payload
                 if not task.accepts_event(event):
+                    batch.add((None, message.event_id))
                     continue
                 event_id = task.event_id(event)
                 if event_id is not None:
                     event_time, features = _timestamp(task, event), task.features_for(event)
                     if hot is not None:
                         hot.put_event(event_id, event_time, event, features)
-                    batch.add((event_id, event_time, event, features))
+                    batch.add(((event_id, event_time, event, features), message.event_id))
+                else:
+                    batch.add((None, message.event_id))
         finally:
             stop.set()
             timer.join(timeout=2)
@@ -133,6 +178,7 @@ def collect_labels(
 ) -> None:
     stop = stop or threading.Event()
     delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
+    cursor_state = _cursor_state(sessions, task, "label_stream", "labels")
 
     def finalize_negatives() -> None:
         while not stop.is_set():
@@ -152,9 +198,15 @@ def collect_labels(
         finalizer = threading.Thread(target=finalize_negatives, name="negative-label-finalizer", daemon=True)
         finalizer.start()
 
-    def flush(labels: list[tuple[str, Any, str]]) -> None:
+    def flush(items: list[tuple[tuple[str, Any, str] | None, str | None]]) -> None:
+        labels = [label for label, _ in items if label is not None]
+        cursor = _last_cursor(items)
         with sessions.begin() as session:
             inserted = store.add_labels(session, task.TASK_NAME, labels, delay_seconds)
+            if cursor_state is not None and cursor is not None:
+                store.save_stream_cursor(session, task.TASK_NAME, "labels", cursor)
+        if cursor_state is not None and cursor is not None:
+            cursor_state.value = cursor
         if hot is not None:
             hot.mark_labelled([event_id for event_id, _, _ in labels])
         logging.info("flushed %d/%d labels", inserted, len(labels))
@@ -164,10 +216,12 @@ def collect_labels(
         timer = threading.Thread(target=_flush_on_timer, args=(batch, stop), name="label-batch-flush", daemon=True)
         timer.start()
         try:
-            for event in _stream(task, "label_stream", f"{task.TASK_NAME}: labels", task.LABEL_STREAM_URL, stop):
+            for message in _stream(
+                task, "label_stream", f"{task.TASK_NAME}: labels", task.LABEL_STREAM_URL, stop, cursor_state
+            ):
+                event = message.payload
                 label = task.label_for(event)
-                if label is not None:
-                    batch.add(label)
+                batch.add((label, message.event_id))
         finally:
             stop.set()
             timer.join(timeout=2)
@@ -257,27 +311,98 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
             definition["fingerprint"],
         )
         cached = cache.get(registration.model_id)
-        if cached is None or cached.fingerprint != fingerprint:
-            persisted = store.model_metric_state(session, task.TASK_NAME, registration.model_id)
-            tracker = (
-                MetricTracker.restore(definition, persisted.state)
-                if persisted is not None
-                else MetricTracker.fresh(
-                    task.PROBLEM_TYPE,
-                    task.METRICS,
-                    store.model_prediction_count(session, task.TASK_NAME, registration.model_id),
+        try:
+            if cached is None or cached.fingerprint != fingerprint:
+                persisted = store.model_metric_state(session, task.TASK_NAME, registration.model_id)
+                tracker = (
+                    MetricTracker.restore(definition, persisted.state)
+                    if persisted is not None
+                    else MetricTracker.fresh(
+                        task.PROBLEM_TYPE,
+                        task.METRICS,
+                        store.model_prediction_count(session, task.TASK_NAME, registration.model_id),
+                    )
                 )
+                model, snapshot = _load_model(session, task, registration)
+                _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
+                # A legacy/no checkpoint must be upgraded on its next learning
+                # batch before source rows can be archived.
+                checkpointed_at = (
+                    time.monotonic()
+                    if snapshot is not None and snapshot.checkpoint_label_available_at is not None
+                    else 0.0
+                )
+                cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
+        except Exception as error:
+            cache.pop(registration.model_id, None)
+            active = store.record_model_failure(
+                session, task.TASK_NAME, registration.model_id, error, CONFIG.max_model_failures
             )
-            model, snapshot = _load_model(session, task, registration)
-            _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
-            # A legacy/no checkpoint must be upgraded on its next learning
-            # batch before source rows can be archived.
-            checkpointed_at = (
-                time.monotonic() if snapshot is not None and snapshot.checkpoint_label_available_at is not None else 0.0
-            )
-            cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
+            logging.exception("could not load model %s; active=%s", registration.model_id, active)
+            continue
         models.append((registration, cache[registration.model_id]))
     return models
+
+
+def _learn_model(
+    session: Session, task: ModuleType, registration, cached: CachedModel, hot: HotStore | None
+) -> tuple[int, int, int]:
+    """Process one model in the caller's savepoint."""
+    model, tracker = cached.model, cached.tracker
+    skipped = store.labelled_unpredicted_events(
+        session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
+    )
+    store.add_prediction_skips(session, task.TASK_NAME, model.model_id, skipped)
+    if hot is not None:
+        hot.mark_labelled(skipped)
+    evaluations = store.unevaluated_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
+    if hot is not None:
+        hot.mark_labelled([event_id for event_id, _, _ in evaluations])
+    for _, y, prediction in evaluations:
+        tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
+    store.add_metric_updates(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _ in evaluations])
+    labels = store.untrained_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
+    if hot is not None:
+        hot.mark_labelled([event_id for event_id, _, _, _ in labels])
+    if supports_learning(model):
+        label_features = _features(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
+        for event_id, y, _, _ in labels:
+            model.learn_one(label_features[event_id], y)
+    store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
+    events = store.unpredicted_events(
+        session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
+    )
+    prediction_features = _features(session, task.TASK_NAME, events, hot)
+    predictions = [
+        (event_id, prediction_for(task, model, prediction_features[event_id], event_id)) for event_id in events
+    ]
+    inserted_predictions = set(store.add_predictions(session, task.TASK_NAME, model.model_id, predictions))
+    raced_labels = [event_id for event_id, _ in predictions if event_id not in inserted_predictions]
+    store.add_prediction_skips(session, task.TASK_NAME, model.model_id, raced_labels)
+    tracker.predictions += len(inserted_predictions)
+    if labels or evaluations or predictions:
+        store.save_metric_state(
+            session,
+            task.TASK_NAME,
+            model.model_id,
+            tracker.definition,
+            tracker.payload(),
+            tracker.predictions,
+            tracker.observations,
+            tracker.values(),
+        )
+        if labels and time.monotonic() - cached.checkpointed_at >= CONFIG.model_checkpoint_seconds:
+            _, _, label_available_at, event_sequence = labels[-1]
+            payload = model.payload()
+            if len(payload) > CONFIG.max_model_snapshot_bytes:
+                raise ValueError(
+                    f"serialized model is {len(payload):,} bytes; limit is {CONFIG.max_model_snapshot_bytes:,} bytes"
+                )
+            store.save_pickle_snapshot(
+                session, task.TASK_NAME, model.model_id, payload, label_available_at, event_sequence
+            )
+            cached.checkpointed_at = time.monotonic()
+    return len(labels), len(inserted_predictions), len(evaluations)
 
 
 def learn_once(
@@ -286,63 +411,19 @@ def learn_once(
     cache = cache if cache is not None else {}
     results = []
     for registration, cached in _active_models(session, task, cache):
-        model, tracker = cached.model, cached.tracker
-        skipped = store.labelled_unpredicted_events(
-            session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
-        )
-        store.add_prediction_skips(session, task.TASK_NAME, model.model_id, skipped)
-        if hot is not None:
-            hot.mark_labelled(skipped)
-        evaluations = store.unevaluated_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
-        if hot is not None:
-            hot.mark_labelled([event_id for event_id, _, _ in evaluations])
-        for _, y, prediction in evaluations:
-            tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
-        store.add_metric_updates(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _ in evaluations])
-        labels = store.untrained_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
-        if hot is not None:
-            hot.mark_labelled([event_id for event_id, _, _, _ in labels])
-        if supports_learning(model):
-            label_features = _features(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
-            for event_id, y, _, _ in labels:
-                model.learn_one(label_features[event_id], y)
-        store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
-        events = store.unpredicted_events(
-            session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
-        )
-        prediction_features = _features(session, task.TASK_NAME, events, hot)
-        predictions = [
-            (event_id, prediction_for(task, model, prediction_features[event_id], event_id)) for event_id in events
-        ]
-        inserted_predictions = set(
-            store.add_predictions(
-                session,
-                task.TASK_NAME,
-                model.model_id,
-                predictions,
+        try:
+            with session.begin_nested():
+                trained, predicted, evaluated = _learn_model(session, task, registration, cached, hot)
+        except Exception as error:
+            cache.pop(registration.model_id, None)
+            active = store.record_model_failure(
+                session, task.TASK_NAME, registration.model_id, error, CONFIG.max_model_failures
             )
-        )
-        raced_labels = [event_id for event_id, _ in predictions if event_id not in inserted_predictions]
-        store.add_prediction_skips(session, task.TASK_NAME, model.model_id, raced_labels)
-        tracker.predictions += len(inserted_predictions)
-        if labels or evaluations or predictions:
-            store.save_metric_state(
-                session,
-                task.TASK_NAME,
-                model.model_id,
-                tracker.definition,
-                tracker.payload(),
-                tracker.predictions,
-                tracker.observations,
-                tracker.values(),
-            )
-            if labels and time.monotonic() - cached.checkpointed_at >= CONFIG.model_checkpoint_seconds:
-                _, _, label_available_at, event_sequence = labels[-1]
-                store.save_pickle_snapshot(
-                    session, task.TASK_NAME, model.model_id, model.payload(), label_available_at, event_sequence
-                )
-                cached.checkpointed_at = time.monotonic()
-        results.append((model.model_id, len(labels), len(inserted_predictions), len(evaluations)))
+            logging.exception("model %s failed; active=%s", registration.model_id, active)
+            continue
+        if trained or predicted or evaluated:
+            store.record_model_success(session, task.TASK_NAME, registration.model_id)
+        results.append((registration.model_id, trained, predicted, evaluated))
     if hot is not None:
         hot.discard(store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids()))
     return results

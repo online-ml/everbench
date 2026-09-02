@@ -24,6 +24,7 @@ from everbench.schema import (
     ModelState,
     Prediction,
     PredictionSkip,
+    StreamCursor,
     Training,
     WorkerHeartbeat,
 )
@@ -145,6 +146,21 @@ def active_registrations(session: Session, task_name: str) -> list[ModelRegistra
             select(ModelRegistration)
             .where(ModelRegistration.task_name == task_name, ModelRegistration.active)
             .order_by(ModelRegistration.model_id)
+        )
+    )
+
+
+def stream_cursor(session: Session, task_name: str, stream_name: str) -> str | None:
+    row = session.get(StreamCursor, {"task_name": task_name, "stream_name": stream_name})
+    return row.event_id if row else None
+
+
+def save_stream_cursor(session: Session, task_name: str, stream_name: str, event_id: str) -> None:
+    session.execute(
+        insert(StreamCursor)
+        .values(task_name=task_name, stream_name=stream_name, event_id=event_id)
+        .on_conflict_do_update(
+            index_elements=["task_name", "stream_name"], set_={"event_id": event_id, "updated_at": func.now()}
         )
     )
 
@@ -482,6 +498,9 @@ def register_model(
             raise ValueError("model_id already has different kind or config; choose a new model_id")
         registration.owner = owner
         registration.active = True
+        registration.failure_count = 0
+        registration.last_error = None
+        registration.failed_at = None
         return registration, False
     start_sequence = session.scalar(
         select(func.coalesce(func.max(BenchmarkEvent.sequence) + 1, 1)).where(BenchmarkEvent.task_name == task_name)
@@ -505,6 +524,33 @@ def deactivate_model(session: Session, task_name: str, model_id: str) -> bool:
         return False
     registration.active = False
     return True
+
+
+def record_model_failure(
+    session: Session, task_name: str, model_id: str, error: BaseException, max_failures: int
+) -> bool:
+    """Record one failed model cycle and deactivate repeated offenders.
+
+    Returns whether the model remains active. The traceback stays in logs; the
+    database retains a concise operational message for the dashboard/API.
+    """
+    registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
+    if registration is None:
+        return False
+    registration.failure_count += 1
+    registration.last_error = f"{type(error).__name__}: {error}"[:2_000]
+    registration.failed_at = datetime.now(UTC)
+    if registration.failure_count >= max_failures:
+        registration.active = False
+    return registration.active
+
+
+def record_model_success(session: Session, task_name: str, model_id: str) -> None:
+    registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
+    if registration is not None and registration.failure_count:
+        registration.failure_count = 0
+        registration.last_error = None
+        registration.failed_at = None
 
 
 def model_registration(session: Session, task_name: str, model_id: str) -> ModelRegistration | None:
@@ -715,6 +761,10 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
         text(
             """SELECT model.model_id,
                       model.owner,
+                      model.active,
+                      model.failure_count,
+                      model.last_error,
+                      model.failed_at,
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
@@ -825,5 +875,5 @@ def record_archive(
 
 def purge_archived_events(session: Session, task_name: str, event_ids: list[str]) -> None:
     """Only call after a manifest was committed for a durable archive target."""
-    for model in (MetricUpdate, Training, PredictionSkip, BenchmarkLabel, BenchmarkEvent):
+    for model in (MetricUpdate, Training, PredictionSkip, Prediction, BenchmarkLabel, BenchmarkEvent):
         session.execute(delete(model).where(model.task_name == task_name, model.event_id.in_(event_ids)))

@@ -36,7 +36,11 @@ class RuntimeConfig:
     max_model_bytes: int = _int("EVERBENCH_MAX_MODEL_BYTES", 10 * 1024 * 1024)
     max_class_definition_bytes: int = _int("EVERBENCH_MAX_CLASS_DEFINITION_BYTES", 100 * 1024)
     model_checkpoint_seconds: float = float(os.getenv("EVERBENCH_MODEL_CHECKPOINT_SECONDS", "60"))
+    max_model_snapshot_bytes: int = _int("EVERBENCH_MAX_MODEL_SNAPSHOT_BYTES", 20 * 1024 * 1024)
     max_active_models_per_task: int = _int("EVERBENCH_MAX_ACTIVE_MODELS_PER_TASK", 20)
+    max_model_failures: int = _int("EVERBENCH_MAX_MODEL_FAILURES", 3)
+    max_backtest_bytes: int = _int("EVERBENCH_MAX_BACKTEST_BYTES", 25 * 1024 * 1024)
+    max_backtest_rows: int = _int("EVERBENCH_MAX_BACKTEST_ROWS", 100_000)
 
 
 CONFIG = RuntimeConfig()

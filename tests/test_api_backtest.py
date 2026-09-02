@@ -42,7 +42,9 @@ class BacktestApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.parquet"
             pq.write_table(pa.Table.from_pylist(rows), path)
-            manifest = SimpleNamespace(path=str(path), content_sha256="archive")
+            manifest = SimpleNamespace(
+                path=str(path), content_sha256="archive", row_count=1, byte_size=path.stat().st_size
+            )
             with (
                 patch("everbench.api._session", return_value=SimpleNamespace()),
                 patch("everbench.api.store.task_archive", return_value=manifest),

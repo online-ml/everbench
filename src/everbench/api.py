@@ -335,6 +335,16 @@ def create_app() -> Flask:
         if manifest is None:
             return jsonify(error="archive not found"), 404
         try:
+            archive_bytes_count = (
+                manifest.byte_size if manifest.byte_size is not None else archive.archive_size(manifest.path)
+            )
+        except OSError:
+            return jsonify(error="archive is unavailable"), 404
+        if manifest.row_count > CONFIG.max_backtest_rows:
+            return jsonify(error=f"archive exceeds the {CONFIG.max_backtest_rows:,}-row backtest limit"), 413
+        if archive_bytes_count > CONFIG.max_backtest_bytes:
+            return jsonify(error=f"archive exceeds the {CONFIG.max_backtest_bytes:,}-byte backtest limit"), 413
+        try:
             result = archive.replay_archive(task, uploaded_model, archive_bytes(manifest))
         except Exception as error:
             return jsonify(error=f"backtest failed: {error}"), 422

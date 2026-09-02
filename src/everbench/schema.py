@@ -146,6 +146,9 @@ class ModelRegistration(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
     artifact_id: Mapped[str | None] = mapped_column(String)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -196,5 +199,18 @@ class WorkerHeartbeat(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text)
     last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class StreamCursor(Base):
+    """Last durably accepted SSE event ID for a task input stream."""
+
+    __tablename__ = "stream_cursors"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    stream_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
