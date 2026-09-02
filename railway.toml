@@ -2,7 +2,6 @@
 builder = "RAILPACK"
 
 [deploy]
-preDeployCommand = "uv run everbench migrate"
 startCommand = "sh scripts/railway-start.sh"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

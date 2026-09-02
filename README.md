@@ -135,9 +135,9 @@ Add a Railway Postgres service and expose its `DATABASE_URL` to both services.
 Set the shared secrets and R2 variables (`EVERBENCH_API_KEY`,
 `EVERBENCH_MODEL_SIGNING_KEY`, `S3_BUCKET_NAME`, `S3_ENDPOINT_URL`,
 `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`) as Railway shared variables.
-Set `uv run alembic upgrade head` as a pre-deploy command on the Web service
-with a five-minute timeout. Enable GitHub autodeploys on `main` (and “Wait for
-CI” if available) for both services.
+The shared start script applies migrations before starting either service and
+serializes them with a Postgres advisory lock. Enable GitHub autodeploys on
+`main` (and “Wait for CI” if available) for both services.
 
 The worker uses bounded in-memory write batches and resumes committed work from
 Postgres after restart. Set `EVERBENCH_ARCHIVE_ROOT` to durable, shared storage
