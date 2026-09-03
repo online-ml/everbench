@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
+from inspect import Parameter, signature
 from types import ModuleType
 from typing import Any
 
@@ -12,25 +14,18 @@ from everbench.metrics import MetricTracker
 
 def prediction_for(task: ModuleType, model: Any, features: dict[str, float], event_id: str | None = None) -> Any:
     """Apply a task's prediction semantics to a model."""
-    if getattr(model, "uses_event_context", False):
-        if event_id is None:
-            raise ValueError("this model requires an event ID to make a prediction")
-        return model.predict_event(event_id, features)
-    hook = getattr(task, "predict_for", None)
-    if hook is not None:
-        return hook(model, features)
     if task.PROBLEM_TYPE == "binary_classification":
         try:
-            probabilities = model.predict_proba_one(features)
+            probabilities = model.predict_proba_one(features, event_id=event_id)
         except AttributeError:
-            return model.predict_one(features)
+            return model.predict_one(features, event_id=event_id)
         return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
     if task.PROBLEM_TYPE == "anomaly_detection":
         try:
-            return model.score_one(features)
+            return model.score_one(features, event_id=event_id)
         except AttributeError:
-            return model.predict_one(features)
-    return model.predict_one(features)
+            return model.predict_one(features, event_id=event_id)
+    return model.predict_one(features, event_id=event_id)
 
 
 def metric_inputs_for(task: ModuleType, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
@@ -43,40 +38,54 @@ class PickledModel:
     """Adapter for trusted online or scoring-only predictor pickles."""
 
     def __init__(self, model_id: str, model: Any):
-        self.uses_event_context = callable(getattr(model, "predict_event", None))
-        if not self.uses_event_context and not (
-            callable(getattr(model, "predict_one", None)) or callable(getattr(model, "predict_proba_one", None))
-        ):
-            raise TypeError(
-                "pickled models must provide predict_one(features), predict_proba_one(features), or predict_event(event_id, features)"
-            )
+        self._predict_one = getattr(model, "predict_one", None)
+        self._predict_proba_one = getattr(model, "predict_proba_one", None)
+        self._score_one = getattr(model, "score_one", None)
+        if not (callable(self._predict_one) or callable(self._predict_proba_one)):
+            raise TypeError("pickled models must provide predict_one(features) or predict_proba_one(features)")
         self.model_id = model_id
         self.model = model
+        self._predict_one_accepts_event_id = self._accepts_event_id(self._predict_one)
+        self._predict_proba_one_accepts_event_id = self._accepts_event_id(self._predict_proba_one)
+        self._score_one_accepts_event_id = self._accepts_event_id(self._score_one)
 
     @property
     def supports_learning(self) -> bool:
         return callable(getattr(self.model, "learn_one", None))
 
-    def predict_one(self, features: dict[str, float]) -> Any:
-        return self.model.predict_one(features)
-
-    def predict_proba_one(self, features: dict[str, float]) -> Any:
-        predictor = getattr(self.model, "predict_proba_one", None)
+    @staticmethod
+    def _accepts_event_id(predictor: Callable[..., Any] | None) -> bool:
         if predictor is None:
+            return False
+        try:
+            parameters = signature(predictor).parameters.values()
+        except (TypeError, ValueError):
+            parameters = ()
+        return any(parameter.name == "event_id" or parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters)
+
+    @staticmethod
+    def _call_predictor(
+        predictor: Callable[..., Any], accepts_event_id: bool, features: dict[str, float], event_id: str | None
+    ) -> Any:
+        """Preserve River's one-argument protocol while allowing event-aware models."""
+        return predictor(features, event_id=event_id) if accepts_event_id else predictor(features)
+
+    def predict_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+        if not callable(self._predict_one):
+            raise AttributeError("underlying model does not provide predict_one")
+        return self._call_predictor(self._predict_one, self._predict_one_accepts_event_id, features, event_id)
+
+    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+        if not callable(self._predict_proba_one):
             raise AttributeError("underlying model does not provide predict_proba_one")
-        return predictor(features)
+        return self._call_predictor(
+            self._predict_proba_one, self._predict_proba_one_accepts_event_id, features, event_id
+        )
 
-    def score_one(self, features: dict[str, float]) -> Any:
-        scorer = getattr(self.model, "score_one", None)
-        if scorer is None:
+    def score_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+        if not callable(self._score_one):
             raise AttributeError("underlying model does not provide score_one")
-        return scorer(features)
-
-    def predict_event(self, event_id: str, features: dict[str, float]) -> Any:
-        predictor = getattr(self.model, "predict_event", None)
-        if predictor is None:
-            raise AttributeError("underlying model does not provide predict_event")
-        return predictor(event_id, features)
+        return self._call_predictor(self._score_one, self._score_one_accepts_event_id, features, event_id)
 
     def learn_one(self, features: dict[str, float], y: Any) -> None:
         learner = getattr(self.model, "learn_one", None)

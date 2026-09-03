@@ -20,15 +20,16 @@ import cloudpickle
 class LiftWingRevertRisk:
     """Return Lift Wing's probability that a Wikipedia revision is reverted."""
 
-    uses_event_context = True
     endpoint = "https://api.wikimedia.org/service/lw/inference/v1/models/revertrisk-language-agnostic:predict"
 
     def __init__(self, user_agent: str, timeout_seconds: float = 10.0):
         self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
 
-    def predict_event(self, event_id: str, features: dict[str, float]) -> float:
+    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> dict[bool, float]:
         del features
+        if event_id is None:
+            raise ValueError("Lift Wing requires an event ID")
         wiki, separator, revision_id = event_id.partition(":")
         if not separator or not wiki.endswith("wiki") or not revision_id.isdigit():
             raise ValueError("Lift Wing requires an event ID in the form '<language>wiki:<revision_id>'")
@@ -41,9 +42,10 @@ class LiftWingRevertRisk:
         with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310 -- fixed Wikimedia endpoint
             payload = json.load(response)
         try:
-            return float(payload["output"]["probabilities"]["true"])
+            risk = float(payload["output"]["probabilities"]["true"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Lift Wing returned an unexpected revert-risk response") from error
+        return {False: 1.0 - risk, True: risk}
 
 
 def main() -> None:

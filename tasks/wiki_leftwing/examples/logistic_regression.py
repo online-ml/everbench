@@ -31,8 +31,9 @@ class WikiFeatureLogisticRegression:
             "anonymous_short_comment": anonymous * float(comment_length < 10),
         }
 
-    def predict_proba_one(self, features: dict[str, float]) -> dict[bool, float]:
+    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> dict[bool, float]:
+        del event_id
         return self.model.predict_proba_one(self.transform(features))
 
-    def learn_one(self, features: dict[str, float], y: int) -> None:
-        self.model.learn_one(self.transform(features), bool(y))
+    def learn_one(self, features: dict[str, float], label: int) -> None:
+        self.model.learn_one(self.transform(features), bool(label))
