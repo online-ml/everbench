@@ -161,7 +161,7 @@ def create_app() -> Flask:
             return "unavailable"
         for unit in ("B", "KB", "MB", "GB", "TB"):
             if size < 1024 or unit == "TB":
-                return f"{int(size):,} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+                return f"{size:,.0f} {unit}"
             size /= 1024
         raise AssertionError("unreachable")
 
