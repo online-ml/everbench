@@ -32,7 +32,7 @@ def test_task_dashboard_loads_refresh_behavior_and_configured_metrics(client: Fl
     response = client.get("/tasks/dummy")
 
     assert response.status_code == 200
-    assert 'hx-trigger="every 30s"' in response.text
+    assert 'hx-trigger="every 5s"' in response.text
     assert 'src="/static/task.js"' in response.text
     assert "Accuracy" in response.text
 
