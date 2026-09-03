@@ -74,6 +74,11 @@ def archive_bytes(manifest) -> bytes:
         abort(404)
 
 
+def display_enum(value: str) -> str:
+    """Render internal snake-case enum values as human-facing labels."""
+    return value.replace("_", " ").replace("-", " ").title()
+
+
 def multipart_json(name: str, default: dict[str, Any] | None = None) -> dict[str, Any] | None:
     value = request.form.get(name)
     if value is None:
@@ -159,6 +164,10 @@ def create_app() -> Flask:
             size /= 1024
         raise AssertionError("unreachable")
 
+    @app.template_filter("enum")
+    def format_enum(value: str) -> str:
+        return display_enum(value)
+
     @app.get("/")
     def dashboard() -> str:
         return render_template("tasks.html", tasks=store.task_names(_session()))
@@ -174,6 +183,7 @@ def create_app() -> Flask:
         return render_template(
             "task.html",
             task_name=task_name,
+            task_type=task.PROBLEM_TYPE,
             task_description=task.DESCRIPTION_HTML,
             archives=store.task_archives(_session(), task_name),
             **snapshot,
