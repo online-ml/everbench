@@ -7,7 +7,7 @@
   </div>
 
   <section class="api-docs">
-    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for both the API key and the signing key.</p>
+    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for both the API key and the signing key.</p>
   </section>
 
   <section class="api-docs">
@@ -23,7 +23,7 @@ print(hmac.new(os.environ["EVERBENCH_MODEL_SIGNING_KEY"].encode(), digest, hashl
     <pre><code>signature="$(python sign_model.py model.pkl)"
 curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
   -H 'X-API-Key: …' \
-  -H "X-everbench-Artifact-Signature: $signature" \
+  -H "X-Everbench-Artifact-Signature: $signature" \
   -F 'model=@model.pkl' \
   -F 'model_id=my-model' \
   -F 'owner=your-name' \
@@ -41,7 +41,7 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
       <li><strong>anomaly detection</strong> — <code>score_one(event_id: str, event: dict[str, Any]) -&gt; float</code>; <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; float</code> is also accepted.</li>
     </ul>
     <p><code>learn_one(event_id: str, event: dict[str, Any], label: object) -&gt; None</code> is optional and receives each label when it becomes available.</p>
-    <p>everbench always passes the raw accepted event and its ID. Models own feature extraction and can ignore either input when it is not useful.</p>
+    <p>Everbench always passes the raw accepted event and its ID. Models own feature extraction and can ignore either input when it is not useful.</p>
     <p>Upload validation deep-copies the model, predicts recent labelled examples, and then learns when supported. This checks that the uploaded model works as expected without changing the uploaded object.</p>
   </section>
 
@@ -55,7 +55,7 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
     <p><code>POST /api/tasks/&lt;task&gt;/backtest</code> accepts a signed <code>model</code> pickle and <code>archive_sha256</code>. It does not register or change the model. The response contains final metrics and prediction/learning durations.</p>
     <pre><code>curl -X POST http://127.0.0.1:8000/api/tasks/dummy/backtest \
   -H 'X-API-Key: …' \
-  -H "X-everbench-Artifact-Signature: $signature" \
+  -H "X-Everbench-Artifact-Signature: $signature" \
   -F 'model=@model.pkl' \
   -F 'archive_sha256=the-SHA-256-in-the-archive-link'</code></pre>
   </section>

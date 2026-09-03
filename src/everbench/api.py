@@ -248,7 +248,7 @@ def create_app() -> Flask:
         if metadata is None:
             return jsonify(error="metadata must be a JSON object"), 400
         payload = uploaded.read(CONFIG.max_model_bytes + 1)
-        signature = request.headers.get("X-everbench-Artifact-Signature", "")
+        signature = request.headers.get("X-Everbench-Artifact-Signature", "")
         if not payload or len(payload) > CONFIG.max_model_bytes:
             return jsonify(error=f"model must be between 1 and {CONFIG.max_model_bytes} bytes"), 413
         try:
@@ -312,7 +312,7 @@ def create_app() -> Flask:
         if not isinstance(archive_sha256, str) or not archive_sha256:
             return jsonify(error="archive_sha256 is required"), 400
         payload = uploaded.read(CONFIG.max_model_bytes + 1)
-        signature = request.headers.get("X-everbench-Artifact-Signature", "")
+        signature = request.headers.get("X-Everbench-Artifact-Signature", "")
         if not payload or len(payload) > CONFIG.max_model_bytes:
             return jsonify(error=f"model must be between 1 and {CONFIG.max_model_bytes} bytes"), 413
         try:

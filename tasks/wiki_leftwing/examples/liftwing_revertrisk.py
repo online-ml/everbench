@@ -1,6 +1,6 @@
 """Build a scoring-only Lift Wing predictor for the wiki-leftwing task.
 
-This file is deliberately outside everbench's runtime. It is an ordinary
+This file is deliberately outside Everbench's runtime. It is an ordinary
 user-owned model definition which cloudpickle embeds in ``liftwing.pkl``.
 
 Example:

@@ -1,4 +1,4 @@
-"""everbench: durable, live predict-then-learn benchmarks."""
+"""Everbench: durable, live predict-then-learn benchmarks."""
 
 from pathlib import Path
 

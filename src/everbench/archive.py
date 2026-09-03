@@ -151,7 +151,7 @@ def _record(row: dict) -> dict:
     return {
         "event_id": row["event_id"],
         # ``event_sequence`` makes same-timestamp replay deterministic. It is
-        # the durable ordering assigned when everbench accepted the event.
+        # the durable ordering assigned when Everbench accepted the event.
         "event_sequence": row["sequence"],
         "event_available_at": row["inserted_at"].isoformat(),
         "payload_json": json.dumps(row["event"], sort_keys=True, separators=(",", ":")),

@@ -1,4 +1,4 @@
-# everbench
+# Everbench
 
 https://everbench-production.up.railway.app
 
