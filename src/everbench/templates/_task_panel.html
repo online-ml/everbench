@@ -32,7 +32,7 @@
         {% for row in leaderboard %}
           <tr>
             <td data-sort-value="{{ row.model_id }}">
-              <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / {{ row.class_name }}">{{ row.model_id }}</button>
+              <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
               <template>
                 {% if row.class_definition %}
                   <pre><code>{{ row.class_definition }}</code></pre>
