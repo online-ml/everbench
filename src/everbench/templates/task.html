@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}everbench — {{ task_name }}{% endblock %}
 {% block content %}
-  <h1><a href="{{ url_for('dashboard') }}">everbench</a> <span>/ {{ task_name }} · {{ task_type|replace('_', ' ') }}</span></h1>
+  <h1><a href="{{ url_for('dashboard') }}">everbench</a> <span>/ {{ task_name }}</span></h1>
+  <p class="task-type"><span>{{ task_type|replace('_', ' ') }}</span></p>
   <div class="description">{{ task_description|safe }}</div>
   {% include "_task_panel.html" %}
   <dialog class="model-dialog" data-persistent-model-dialog>

@@ -9,6 +9,9 @@ h2 { font-size: 14px; margin: 32px 0 8px; text-transform: uppercase; }
 .breadcrumb, .muted { color: #666; }
 .description { max-width: 720px; }
 .description p { margin: -10px 0 0; }
+.task-type { margin: -14px 0 16px; }
+.task-type span { display: inline-block; border: 1px solid #111; padding: 1px 6px; font-size: 12px; }
+.task-type + .description p { margin: 0; }
 .introduction { max-width: 640px; margin: -10px 0 20px; }
 .task-list { margin: 0; padding-left: 20px; }
 .task-list li { margin: 6px 0; }
