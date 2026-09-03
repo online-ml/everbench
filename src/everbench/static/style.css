@@ -1,7 +1,8 @@
 :root { color: #111; background: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 * { box-sizing: border-box; }
+html, body { max-width: 100%; overflow-x: hidden; }
 body { margin: 0; font-size: 14px; line-height: 1.5; }
-main { max-width: 960px; margin: 0 auto; padding: 36px 20px; }
+main { width: 100%; max-width: 960px; margin: 0 auto; padding: 36px 20px; }
 a { color: inherit; text-decoration-thickness: 1px; }
 h1 { font-size: 24px; margin: 0 0 24px; }
 h1 span { color: #666; font-weight: 400; }
@@ -63,4 +64,4 @@ tbody tr:nth-child(odd) { background: #f3f3f3; }
 .model-protocol li { margin: 4px 0; }
 pre { overflow-x: auto; margin: 10px 0 0; padding: 10px; background: #f3f3f3; font: inherit; line-height: 1.5; }
 .updated { position: fixed; right: 20px; bottom: 14px; margin: 0; color: #666; font-size: 12px; }
-@media (max-width: 640px) { header, main { padding: 14px; } table { font-size: 12px; } th, td { padding: 6px; } }
+@media (max-width: 640px) { main { padding: 18px 12px 42px; } table { font-size: 12px; } th, td { padding: 6px; } .updated { right: 12px; bottom: 12px; } }
