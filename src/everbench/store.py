@@ -513,15 +513,10 @@ def register_model(
 ) -> tuple[ModelRegistration, bool]:
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration:
-        if registration.artifact_id != artifact_id:
-            raise ValueError("model_id already has a different artifact; choose a new model_id")
-        registration.owner = owner
-        registration.active = True
-        registration.failure_count = 0
-        registration.last_error = None
-        registration.failed_at = None
-        registration.disabled_until = None
-        return registration, False
+        if registration.active and registration.artifact_id == artifact_id:
+            # Retrying the exact same active upload is safe and idempotent.
+            return registration, False
+        raise ValueError("model_id has already been used; choose a new model_id")
     start_sequence = session.scalar(
         select(func.coalesce(func.max(BenchmarkEvent.sequence) + 1, 1)).where(BenchmarkEvent.task_name == task_name)
     )

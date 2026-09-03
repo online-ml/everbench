@@ -42,12 +42,12 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
     </ul>
     <p><code>learn_one(event_id: str, event: dict[str, Any], label: object) -&gt; None</code> is optional and receives each label when it becomes available.</p>
     <p>Everbench always passes the raw accepted event and its ID. Models own feature extraction and can ignore either input when it is not useful.</p>
-    <p>Upload validation deep-copies the model, predicts recent labelled examples, and learns from them when supported. This checks that the uploaded model works as expected without changing the uploaded object.</p>
+    <p>Upload validation deep-copies the model, predicts recent labelled examples, and then learns when supported. This checks that the uploaded model works as expected without changing the uploaded object.</p>
   </section>
 
   <section class="api-docs">
     <h2>Delete a model</h2>
-    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> deactivates a model.</p>
+    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> retires a model. Model IDs are immutable: upload a replacement with a new ID so its metrics start independently.</p>
   </section>
 
   <section class="api-docs">

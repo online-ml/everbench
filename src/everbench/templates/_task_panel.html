@@ -14,7 +14,8 @@
 
   <section>
     <h2>Leaderboard</h2>
-    <table class="leaderboard" data-sortable data-sort-table="leaderboard" {% if not leaderboard %}hidden{% endif %}>
+    <div class="table-scroll" {% if not leaderboard %}hidden{% endif %}>
+    <table class="leaderboard" data-sortable data-sort-table="leaderboard">
       <thead>
         <tr>
           <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>
@@ -59,6 +60,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     <p class="muted" {% if leaderboard %}hidden{% endif %}>No models are registered for this task.</p>
   </section>
 </div>
