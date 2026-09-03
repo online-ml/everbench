@@ -11,7 +11,8 @@ h2 { font-size: 14px; margin: 32px 0 8px; text-transform: uppercase; }
 .description { max-width: 720px; }
 .description p { margin: -10px 0 0; }
 .task-type { margin: -14px 0 16px; }
-.task-type span { display: inline-block; border: 1px solid #111; padding: 1px 6px; font-size: 12px; }
+.task-type span, .task-type a { display: inline-block; border: 1px solid #111; padding: 1px 6px; font-size: 12px; text-decoration: none; }
+.task-type a:hover, .task-type a:focus-visible { background: #f3f3f3; }
 .task-type + .description p { margin: 0; }
 .introduction { max-width: 640px; margin: -10px 0 20px; }
 .task-list { margin: 0; padding-left: 20px; }

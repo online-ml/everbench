@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from sqlalchemy.orm import Session
 
 from everbench import artifacts
-from everbench.api import validation_examples
+from everbench.api import task_source_url, validation_examples
 from everbench.batching import TimedBatch
 from everbench.models import PickledModel, prediction_for, validate_uploaded_model
 from everbench.workers import _load_model
@@ -62,6 +63,13 @@ class RuntimeHardeningTest(unittest.TestCase):
             model, snapshot = _load_model(cast(Session, None), cast(ModuleType, task), registration)
         self.assertIsNone(snapshot)
         self.assertEqual(model.predict_one("event", {}), 0.5)
+
+    def test_task_source_url_links_to_the_checked_in_definition(self) -> None:
+        task = SimpleNamespace(__file__=Path("tasks/dummy/task.py").resolve())
+
+        self.assertEqual(
+            task_source_url(task), "https://github.com/online-ml/everbench/blob/main/tasks/dummy/task.py"
+        )
 
     def test_idle_batch_flushes_without_another_source_item(self) -> None:
         flushed: list[list[str]] = []

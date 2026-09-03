@@ -20,6 +20,7 @@ class RuntimeConfig:
     learner_idle_seconds: float = float(os.getenv("EVERBENCH_LEARN_IDLE_SECONDS", "5"))
     heartbeat_seconds: float = float(os.getenv("EVERBENCH_HEARTBEAT_SECONDS", "30"))
     hot_event_capacity: int = _int("EVERBENCH_HOT_EVENT_CAPACITY", 10_000)
+    hot_event_max_bytes: int = _int("EVERBENCH_HOT_EVENT_MAX_BYTES", 512 * 1024)
     shutdown_flush_seconds: float = float(os.getenv("EVERBENCH_SHUTDOWN_FLUSH_SECONDS", "20"))
     archive_after_days: int = _int("EVERBENCH_ARCHIVE_AFTER_DAYS", 30)
     archive_batch_size: int = _int("EVERBENCH_ARCHIVE_BATCH_SIZE", 10_000)

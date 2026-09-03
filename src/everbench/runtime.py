@@ -108,7 +108,7 @@ def run_task(
     in an essential loop stops the process so Railway can restart it.
     """
     stop = stop or threading.Event()
-    hot = HotStore(CONFIG.hot_event_capacity)
+    hot = HotStore(CONFIG.hot_event_capacity, CONFIG.hot_event_max_bytes)
     failures: queue.SimpleQueue[Failure] = queue.SimpleQueue()
 
     def compact() -> None:

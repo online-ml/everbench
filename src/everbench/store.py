@@ -34,10 +34,10 @@ def add_events(
     task_name: str,
     events: list[tuple[str, float, dict[str, Any]]],
     delay_seconds: float | None = None,
-) -> int:
-    """Insert a collector batch in one statement and one transaction."""
+) -> list[str]:
+    """Insert a collector batch and return the event IDs that became durable."""
     if not events:
-        return 0
+        return []
     values = [
         {
             "task_name": task_name,
@@ -53,7 +53,7 @@ def add_events(
         .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
         .returning(BenchmarkEvent.event_id)
     )
-    inserted = len(session.scalars(statement).all())
+    inserted_event_ids = list(session.scalars(statement).all())
     # A label can arrive before its event batch. Once the event is available,
     # apply the configured positive-label horizon to that pending label too.
     if delay_seconds is not None:
@@ -73,7 +73,7 @@ def add_events(
                 "delay_seconds": delay_seconds,
             },
         )
-    return inserted
+    return inserted_event_ids
 
 
 def add_expired_negative_labels(session: Session, task_name: str, delay_seconds: float | None) -> list[str]:
@@ -99,14 +99,14 @@ def add_expired_negative_labels(session: Session, task_name: str, delay_seconds:
 
 def add_labels(
     session: Session, task_name: str, labels: list[tuple[str, Any, str]], delay_seconds: float | None
-) -> int:
+) -> list[str]:
     """Insert a label-collector batch with one Postgres statement.
 
     A positive label arriving after its configured horizon is ignored: the
     delayed-negative finalizer is the authority once that horizon has passed.
     """
     if not labels:
-        return 0
+        return []
     if delay_seconds is not None:
         event_times = {
             event_id: event_time
@@ -125,7 +125,7 @@ def add_labels(
             if event_id not in event_times or y != 1 or event_times[event_id] > cutoff
         ]
         if not labels:
-            return 0
+            return []
     values = [
         {"task_name": task_name, "event_id": event_id, "y": y, "reason": reason} for event_id, y, reason in labels
     ]
@@ -135,7 +135,7 @@ def add_labels(
         .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
         .returning(BenchmarkLabel.event_id)
     )
-    return len(session.scalars(statement).all())
+    return list(session.scalars(statement).all())
 
 
 def active_registrations(session: Session, task_name: str) -> list[ModelRegistration]:
@@ -294,11 +294,15 @@ def _model_processing_pending_clause() -> str:
         OR NOT EXISTS (
           SELECT 1 FROM model_snapshots AS snapshot
           WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
+        )
+        OR EXISTS (
+          SELECT 1 FROM model_snapshots AS snapshot
+          WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
             AND (
               snapshot.checkpoint_label_available_at IS NULL
-              OR snapshot.checkpoint_label_available_at > label.available_at
+              OR snapshot.checkpoint_label_available_at < label.available_at
               OR (snapshot.checkpoint_label_available_at = label.available_at
-                  AND snapshot.checkpoint_event_sequence >= event.sequence)
+                  AND snapshot.checkpoint_event_sequence < event.sequence)
             )
         )
     )"""
@@ -308,6 +312,10 @@ def completed_labelled_events(session: Session, task_name: str, event_ids: list[
     """Find labelled events no eligible active model still needs to process."""
     if not event_ids:
         return []
+    # Checkpoints are updated through the ORM, while this eligibility query is
+    # deliberately raw SQL. Flush first so a just-completed learning batch can
+    # release its hot-cache entries in the same transaction.
+    session.flush()
     rows = session.execute(
         text(
             f"""SELECT event.event_id
@@ -597,6 +605,44 @@ def record_model_success(session: Session, task_name: str, model_id: str) -> Non
         registration.disabled_until = None
 
 
+def advance_model_checkpoint(
+    session: Session,
+    task_name: str,
+    registration: ModelRegistration,
+    label_available_at: datetime,
+    event_sequence: int,
+) -> None:
+    """Mark terminally skipped labels as covered by the model's checkpoint.
+
+    A paused model deliberately does not learn its skipped labels. Its current
+    artifact therefore remains the right restart state, while the watermark
+    prevents those terminal labels from indefinitely blocking compaction.
+    """
+    snapshot = latest_snapshot(session, task_name, registration.model_id)
+    if snapshot is None:
+        if registration.artifact_id is None:
+            raise RuntimeError(f"model artifact missing for {registration.model_id}")
+        session.add(
+            ModelSnapshot(
+                task_name=task_name,
+                model_id=registration.model_id,
+                artifact_id=registration.artifact_id,
+                checkpoint_label_available_at=label_available_at,
+                checkpoint_event_sequence=event_sequence,
+            )
+        )
+        return
+
+    candidate = (label_available_at, event_sequence)
+    if (
+        snapshot.checkpoint_label_available_at is None
+        or snapshot.checkpoint_event_sequence is None
+        or candidate > (snapshot.checkpoint_label_available_at, snapshot.checkpoint_event_sequence)
+    ):
+        snapshot.checkpoint_label_available_at = label_available_at
+        snapshot.checkpoint_event_sequence = event_sequence
+
+
 def record_disabled_work(
     session: Session, task_name: str, registration: ModelRegistration, limit: int
 ) -> tuple[int, int]:
@@ -609,7 +655,14 @@ def record_disabled_work(
     )
     prediction_errors = len(add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled"))
     labels = untrained_labels(session, task_name, registration.model_id, limit)
-    label_errors = len(add_trainings(session, task_name, registration.model_id, [event_id for event_id, *_ in labels]))
+    trained_event_ids = add_trainings(session, task_name, registration.model_id, [event_id for event_id, *_ in labels])
+    label_errors = len(trained_event_ids)
+    if trained_event_ids:
+        trained_event_id_set = set(trained_event_ids)
+        last = max(
+            (label for label in labels if label[0] in trained_event_id_set), key=lambda label: (label[2], label[3])
+        )
+        advance_model_checkpoint(session, task_name, registration, last[2], last[3])
     registration.prediction_errors += prediction_errors
     registration.label_errors += label_errors
     return prediction_errors, label_errors

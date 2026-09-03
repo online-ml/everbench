@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import lru_cache, wraps
 from importlib.metadata import distributions
+from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, abort, g, jsonify, make_response, render_template, request, send_file
@@ -110,6 +111,14 @@ def task_or_404(task_name: str):
         abort(404, description=f"task definition not found: {task_name}")
 
 
+def task_source_url(task) -> str:
+    """Link a checked-in task definition to its canonical GitHub source."""
+    repository_root = Path(__file__).resolve().parents[2]
+    task_path = Path(task.__file__).resolve()
+    relative_path = task_path.relative_to(repository_root).as_posix()
+    return f"https://github.com/online-ml/everbench/blob/main/{relative_path}"
+
+
 def task_snapshot(session: Session, task_name: str) -> dict[str, Any]:
     heartbeats = [heartbeat for heartbeat in store.worker_health(session) if heartbeat.task_name == task_name]
     runtime = next((heartbeat for heartbeat in heartbeats if heartbeat.role == "task-runtime"), None)
@@ -167,6 +176,7 @@ def create_app() -> Flask:
             "task.html",
             task_name=task_name,
             task_type=task.PROBLEM_TYPE,
+            task_source_url=task_source_url(task),
             task_description=task.DESCRIPTION_HTML,
             archives=store.task_archives(_session(), task_name),
             **snapshot,

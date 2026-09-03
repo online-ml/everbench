@@ -121,6 +121,22 @@ def _flush_on_timer(batch: TimedBatch[Any], stop: threading.Event) -> None:
         batch.flush_if_due()
 
 
+def _cache_durable_events(
+    hot: HotStore | None, events: list[tuple[str, float, dict[str, Any]]], inserted_event_ids: list[str]
+) -> None:
+    """Populate RAM only after the event transaction has committed.
+
+    A repeated source message may carry a different payload for an existing
+    event ID. The database's uniqueness constraint decides the canonical
+    record, so the cache must only receive newly inserted rows.
+    """
+    if hot is None or not inserted_event_ids:
+        return
+    events_by_id = {event_id: event for event_id, _, event in events}
+    for event_id in inserted_event_ids:
+        hot.put_event(event_id, events_by_id[event_id])
+
+
 def collect_events(
     sessions: sessionmaker[Session],
     task: ModuleType,
@@ -136,12 +152,13 @@ def collect_events(
         events = [event for event, _ in items if event is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
-            inserted = store.add_events(session, task.TASK_NAME, events, delay_seconds)
+            inserted_event_ids = store.add_events(session, task.TASK_NAME, events, delay_seconds)
             if cursor_state is not None and cursor is not None:
                 store.save_stream_cursor(session, task.TASK_NAME, "events", cursor)
+        _cache_durable_events(hot, events, inserted_event_ids)
         if cursor_state is not None and cursor is not None:
             cursor_state.value = cursor
-        logging.debug("flushed %d/%d events", inserted, len(events))
+        logging.debug("flushed %d/%d events", len(inserted_event_ids), len(events))
 
     batch = TimedBatch(CONFIG.ingest_batch_size, CONFIG.ingest_flush_seconds, flush, CONFIG.ingest_max_pending_items)
     with Heartbeat(sessions, task.TASK_NAME, "event-collector") if heartbeat else nullcontext():
@@ -158,8 +175,6 @@ def collect_events(
                 event_id = task.event_id(event)
                 if event_id is not None:
                     event_time = _timestamp(task, event)
-                    if hot is not None:
-                        hot.put_event(event_id, event)
                     batch.add(((event_id, event_time, event), message.event_id))
                 else:
                     batch.add((None, message.event_id))
@@ -202,14 +217,14 @@ def collect_labels(
         labels = [label for label, _ in items if label is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
-            inserted = store.add_labels(session, task.TASK_NAME, labels, delay_seconds)
+            inserted_event_ids = store.add_labels(session, task.TASK_NAME, labels, delay_seconds)
             if cursor_state is not None and cursor is not None:
                 store.save_stream_cursor(session, task.TASK_NAME, "labels", cursor)
         if cursor_state is not None and cursor is not None:
             cursor_state.value = cursor
         if hot is not None:
-            hot.mark_labelled([event_id for event_id, _, _ in labels])
-        logging.debug("flushed %d/%d labels", inserted, len(labels))
+            hot.mark_labelled(inserted_event_ids)
+        logging.debug("flushed %d/%d labels", len(inserted_event_ids), len(labels))
 
     batch = TimedBatch(CONFIG.ingest_batch_size, CONFIG.ingest_flush_seconds, flush, CONFIG.ingest_max_pending_items)
     with Heartbeat(sessions, task.TASK_NAME, "label-collector") if heartbeat else nullcontext():
@@ -428,7 +443,11 @@ def _learn_model(
 
 
 def learn_once(
-    session: Session, task: ModuleType, cache: dict[str, CachedModel] | None = None, hot: HotStore | None = None
+    session: Session,
+    task: ModuleType,
+    cache: dict[str, CachedModel] | None = None,
+    hot: HotStore | None = None,
+    completed_hot_events: list[str] | None = None,
 ) -> list[tuple[str, int, int, int]]:
     cache = cache if cache is not None else {}
     results = []
@@ -458,7 +477,11 @@ def learn_once(
         cache.pop(registration.model_id, None)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     if hot is not None:
-        hot.discard(store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids()))
+        completed = store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids())
+        if completed_hot_events is None:
+            hot.discard(completed)
+        else:
+            completed_hot_events.extend(completed)
     return results
 
 
@@ -481,8 +504,11 @@ def learner(
         with Heartbeat(sessions, task.TASK_NAME, "learner") if heartbeat else nullcontext():
             while not stop.is_set():
                 try:
-                    results = learn_once(session, task, models, hot)
+                    completed_hot_events: list[str] = []
+                    results = learn_once(session, task, models, hot, completed_hot_events)
                     session.commit()
+                    if hot is not None:
+                        hot.discard(completed_hot_events)
                     for model_id, trained, predicted, evaluated in results:
                         if trained or predicted or evaluated:
                             logging.info(

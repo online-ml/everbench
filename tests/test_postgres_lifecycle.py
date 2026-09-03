@@ -140,6 +140,11 @@ class PostgresLifecycleTest(unittest.TestCase):
             self.assertEqual(leaderboard["broken"]["prediction_errors"], 1)
             self.assertEqual(leaderboard["broken"]["label_errors"], 1)
             self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
+            checkpoint = store.latest_snapshot(session, task_name, "broken")
+            self.assertIsNotNone(checkpoint)
+            assert checkpoint is not None
+            self.assertIsNotNone(checkpoint.checkpoint_label_available_at)
+            self.assertEqual(store.completed_labelled_events(session, task_name, ["event"]), ["event"])
 
     def test_deleted_model_ids_start_fresh_registrations(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "postgres-test-signing-key"
@@ -155,6 +160,27 @@ class PostgresLifecycleTest(unittest.TestCase):
             registration, created = store.register_model(session, task_name, "original", "test", artifact.artifact_id)
             self.assertTrue(created)
             self.assertEqual(registration.model_id, "original")
+
+    def test_event_completion_requires_a_model_checkpoint(self) -> None:
+        os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "postgres-test-signing-key"
+        task_name = f"checkpoint-test-{uuid4()}"
+        event_id = "event"
+        with self.sessions.begin() as session:
+            payload = artifacts.dumps(WorkingModel())
+            artifact = store.store_artifact(session, payload, artifacts.sign(payload), {})
+            registration, _ = store.register_model(session, task_name, "model", "test", artifact.artifact_id)
+            store.add_events(session, task_name, [(event_id, datetime.now(UTC).timestamp(), {"value": 1.0})])
+            store.add_labels(session, task_name, [(event_id, 1, "test")], delay_seconds=None)
+            store.add_prediction_skips(session, task_name, "model", [event_id])
+            store.add_trainings(session, task_name, "model", [event_id])
+
+            self.assertEqual(store.completed_labelled_events(session, task_name, [event_id]), [])
+
+            label_record = session.get(BenchmarkLabel, {"task_name": task_name, "event_id": event_id})
+            event = session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id})
+            assert label_record is not None and event is not None
+            store.advance_model_checkpoint(session, task_name, registration, label_record.available_at, event.sequence)
+            self.assertEqual(store.completed_labelled_events(session, task_name, [event_id]), [event_id])
 
     def test_stream_cursor_is_updated_atomically(self) -> None:
         task_name = f"cursor-test-{uuid4()}"
