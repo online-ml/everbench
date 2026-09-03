@@ -2,7 +2,7 @@
 
 Pickle is code execution, not a safe data format. This module never attempts
 to inspect or validate a pickle. It verifies provenance with an HMAC before a
-worker unpickles an artifact; the HTTP API only stores opaque bytes.
+worker or authenticated HTTP endpoint unpickles an artifact.
 """
 
 from __future__ import annotations

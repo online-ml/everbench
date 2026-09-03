@@ -41,7 +41,6 @@ class RuntimeConfig:
     max_active_models_per_task: int = 20
     model_retry_initial_seconds: float = 1.0
     model_retry_max_seconds: float = 1_800.0
-    max_model_operation_seconds: float = 30.0
     max_backtest_bytes: int = 25 * 1024 * 1024
     max_backtest_rows: int = 100_000
     label_inbox_retention_days: int = 7
@@ -65,7 +64,6 @@ class RuntimeConfig:
             "max_model_snapshot_bytes": self.max_model_snapshot_bytes,
             "max_active_models_per_task": self.max_active_models_per_task,
             "model_retry_max_seconds": self.model_retry_max_seconds,
-            "max_model_operation_seconds": self.max_model_operation_seconds,
             "max_backtest_bytes": self.max_backtest_bytes,
             "max_backtest_rows": self.max_backtest_rows,
             "label_inbox_retention_days": self.label_inbox_retention_days,
@@ -114,9 +112,6 @@ class RuntimeConfig:
                 "EVERBENCH_MODEL_RETRY_INITIAL_SECONDS", defaults.model_retry_initial_seconds
             ),
             model_retry_max_seconds=_float("EVERBENCH_MODEL_RETRY_MAX_SECONDS", defaults.model_retry_max_seconds),
-            max_model_operation_seconds=_float(
-                "EVERBENCH_MAX_MODEL_OPERATION_SECONDS", defaults.max_model_operation_seconds
-            ),
             max_backtest_bytes=_int("EVERBENCH_MAX_BACKTEST_BYTES", defaults.max_backtest_bytes),
             max_backtest_rows=_int("EVERBENCH_MAX_BACKTEST_ROWS", defaults.max_backtest_rows),
             label_inbox_retention_days=_int(

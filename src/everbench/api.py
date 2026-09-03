@@ -34,8 +34,7 @@ from everbench import archive, artifacts, store
 from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
-from everbench.model_process import IsolatedModel
-from everbench.models import validate_model
+from everbench.models import PickledModel, validate_model
 from everbench.tasks import load_task_named
 
 
@@ -314,11 +313,9 @@ def create_app(
         session = _session()
         examples = validation_examples(session, task_name)
         try:
-            with IsolatedModel(
-                "validation", payload, signature, runtime_config.max_model_operation_seconds
-            ) as candidate:
-                example_count = validate_model(task, candidate, examples)
-                class_name = candidate.class_name
+            candidate = PickledModel("validation", artifacts.loads(payload, signature))
+            example_count = validate_model(task, candidate, examples)
+            class_name = type(candidate.model).__name__
         except Exception as error:
             return jsonify(error=f"model validation failed: {error}"), 422
         try:
@@ -398,8 +395,7 @@ def create_app(
             return jsonify(error=f"archive exceeds the {runtime_config.max_backtest_bytes:,}-byte backtest limit"), 413
         data = archive_bytes(manifest)
         try:
-            with IsolatedModel("backtest", payload, signature, runtime_config.max_model_operation_seconds) as candidate:
-                result = archive.replay_model(task, candidate, data)
+            result = archive.replay_archive(task, artifacts.loads(payload, signature), data)
         except Exception as error:
             return jsonify(error=f"backtest failed: {error}"), 422
         return jsonify(archive_sha256=manifest.content_sha256, **result)

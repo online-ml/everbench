@@ -9,25 +9,20 @@ from everbench.metrics import MetricTracker
 from everbench.tasks import TaskDefinition
 
 
-def prediction_for(task: TaskDefinition, model: Any, event_id: str, event: dict[str, Any]) -> Any:
+def prediction_for(task: TaskDefinition, model: PickledModel, event_id: str, event: dict[str, Any]) -> Any:
     """Apply a task's prediction semantics to a model."""
     if task.PROBLEM_TYPE in {"binary_classification", "multiclass_classification"}:
-        if _supports(model, "supports_probabilities", "predict_proba_one"):
+        if model.supports_probabilities:
             probabilities = model.predict_proba_one(event_id, event)
             if task.PROBLEM_TYPE == "multiclass_classification":
                 return probabilities
             return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
         return model.predict_one(event_id, event)
     if task.PROBLEM_TYPE == "anomaly_detection":
-        if _supports(model, "supports_scoring", "score_one"):
+        if model.supports_scoring:
             return model.score_one(event_id, event)
         return model.predict_one(event_id, event)
     return model.predict_one(event_id, event)
-
-
-def _supports(model: Any, capability: str, method: str) -> bool:
-    declared = getattr(model, capability, None)
-    return declared if isinstance(declared, bool) else callable(getattr(model, method, None))
 
 
 def metric_inputs_for(task: TaskDefinition, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
@@ -87,15 +82,9 @@ class PickledModel:
         return artifacts.dumps(self.model)
 
 
-def supports_learning(model: Any) -> bool:
-    """Whether a predictor should receive labels for an in-place update."""
-    capability = getattr(model, "supports_learning", None)
-    return capability if isinstance(capability, bool) else callable(getattr(model, "learn_one", None))
-
-
 def validate_model(
     task: TaskDefinition,
-    candidate: Any,
+    candidate: PickledModel,
     examples: list[tuple[str, dict[str, Any], object]],
 ) -> int:
     """Check a model protocol against recent examples."""
@@ -105,7 +94,7 @@ def validate_model(
     for event_id, event, y in examples[-5:]:
         prediction = prediction_for(task, candidate, event_id, event)
         tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
-        if supports_learning(candidate):
+        if candidate.supports_learning:
             candidate.learn_one(event_id, event, y)
     tracker.values()
     return min(len(examples), 5)

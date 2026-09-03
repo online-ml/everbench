@@ -15,14 +15,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import store
+from everbench import artifacts, store
 from everbench.batching import TimedBatch
 from everbench.config import CONFIG
 from everbench.db import advisory_key
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
-from everbench.model_process import IsolatedModel
-from everbench.models import metric_inputs_for, prediction_for, supports_learning
+from everbench.models import PickledModel, metric_inputs_for, prediction_for
 from everbench.sse import StreamMessage, subscribe
 from everbench.tasks import TaskDefinition
 
@@ -272,38 +271,23 @@ def _load_model(session: Session, task: TaskDefinition, registration):
         artifact_record = store.artifact(session, registration.artifact_id)
     if artifact_record is None:
         raise RuntimeError(f"pickle artifact missing for {registration.model_id}")
-    return IsolatedModel(
-        registration.model_id,
-        artifact_record.payload,
-        artifact_record.signature,
-        CONFIG.max_model_operation_seconds,
-    ), snapshot
+    model = artifacts.loads(artifact_record.payload, artifact_record.signature)
+    return PickledModel(registration.model_id, model), snapshot
 
 
 @dataclass
 class CachedModel:
     fingerprint: tuple[Any, ...]
-    model: IsolatedModel
+    model: PickledModel
     tracker: MetricTracker
     checkpointed_at: float
 
 
-def _discard_cached(cache: dict[str, CachedModel], model_id: str) -> None:
-    cached = cache.pop(model_id, None)
-    if cached is not None:
-        cached.model.close()
-
-
-def _clear_cached(cache: dict[str, CachedModel]) -> None:
-    for model_id in list(cache):
-        _discard_cached(cache, model_id)
-
-
 def _restore_uncheckpointed_learning(
-    session: Session, task: TaskDefinition, registration, model: IsolatedModel, snapshot
+    session: Session, task: TaskDefinition, registration, model: PickledModel, snapshot
 ) -> None:
     """Recover labels learned after the last durable model checkpoint."""
-    if not supports_learning(model):
+    if not model.supports_learning:
         return
     # Snapshots created before checkpoint watermarks existed were written after
     # every learning batch. Treat them as authoritative to avoid replaying
@@ -344,14 +328,14 @@ def _active_models(
     definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
     active_ids = {registration.model_id for registration in registrations}
     for model_id in set(cache) - active_ids:
-        _discard_cached(cache, model_id)
+        cache.pop(model_id)
     models = []
     for registration in registrations:
         fingerprint = (registration.artifact_id, definition["fingerprint"])
         cached = cache.get(registration.model_id)
         try:
             if cached is None or cached.fingerprint != fingerprint:
-                _discard_cached(cache, registration.model_id)
+                cache.pop(registration.model_id, None)
                 persisted = store.model_metric_state(session, task.TASK_NAME, registration.model_id)
                 tracker = (
                     MetricTracker.restore(definition, persisted.state)
@@ -363,11 +347,7 @@ def _active_models(
                     )
                 )
                 model, snapshot = _load_model(session, task, registration)
-                try:
-                    _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
-                except Exception:
-                    model.close()
-                    raise
+                _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
                 # A legacy/no checkpoint must be upgraded on its next learning
                 # batch before source rows can be archived.
                 checkpointed_at = (
@@ -377,7 +357,7 @@ def _active_models(
                 )
                 cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
         except Exception as error:
-            _discard_cached(cache, registration.model_id)
+            cache.pop(registration.model_id, None)
             retry_at = store.record_model_failure(
                 session,
                 task.TASK_NAME,
@@ -412,7 +392,7 @@ def _learn_model(
     labels = store.untrained_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
     if hot is not None:
         hot.mark_labelled([event_id for event_id, _, _, _ in labels])
-    if supports_learning(model):
+    if model.supports_learning:
         label_events = _events(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
         for event_id, y, _, _ in labels:
             model.learn_one(event_id, label_events[event_id], y)
@@ -468,7 +448,7 @@ def learn_once(
     results = []
     initially_disabled_model_ids = set()
     for registration in store.disabled_registrations(session, task.TASK_NAME):
-        _discard_cached(cache, registration.model_id)
+        cache.pop(registration.model_id, None)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
         initially_disabled_model_ids.add(registration.model_id)
     for registration, cached in _active_models(session, task, cache):
@@ -476,7 +456,7 @@ def learn_once(
             with session.begin_nested():
                 trained, predicted, evaluated = _learn_model(session, task, registration, cached, hot)
         except Exception as error:
-            _discard_cached(cache, registration.model_id)
+            cache.pop(registration.model_id, None)
             retry_at = store.record_model_failure(
                 session,
                 task.TASK_NAME,
@@ -493,7 +473,7 @@ def learn_once(
     for registration in store.disabled_registrations(session, task.TASK_NAME):
         if registration.model_id in initially_disabled_model_ids:
             continue
-        _discard_cached(cache, registration.model_id)
+        cache.pop(registration.model_id, None)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     if hot is not None:
         completed = store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids())
@@ -550,13 +530,13 @@ def learner(
                         # database transaction fails. Discard it so the next
                         # cycle reloads the last committed checkpoint instead of
                         # learning the same labels twice.
-                        _clear_cached(models)
+                        models.clear()
                         logging.exception("learner cycle failed")
                     if once:
                         return
                     stop.wait(CONFIG.learner_idle_seconds)
         finally:
-            _clear_cached(models)
+            models.clear()
             try:
                 session.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _task_lock(task.TASK_NAME)})
                 session.commit()

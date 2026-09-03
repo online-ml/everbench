@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import io
 import json
@@ -22,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from everbench import store
 from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
-from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
+from everbench.models import PickledModel, metric_inputs_for, prediction_for
 from everbench.tasks import TaskDefinition
 
 
@@ -111,13 +110,7 @@ def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes
     delayed-feedback semantics of the live benchmark rather than treating each
     archived row as an immediately labelled example.
     """
-    model = PickledModel("backtest", copy.deepcopy(uploaded_model))
-    return replay_model(task, model, path)
-
-
-def replay_model(task: TaskDefinition, model: Any, path: Path | bytes) -> dict[str, Any]:
-    """Backtest an already-adapted model, including isolated model processes."""
-
+    model = PickledModel("backtest", uploaded_model)
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
     # Read archives made before the compact schema too.
@@ -157,7 +150,7 @@ def replay_model(task: TaskDefinition, model: Any, path: Path | bytes) -> dict[s
         event, prediction = predictions.pop(event_id)
         target = value
         tracker.update(target, prediction, lambda metric, y, prediction: metric_inputs_for(task, metric, y, prediction))
-        if supports_learning(model):
+        if model.supports_learning:
             started_at = perf_counter()
             model.learn_one(event_id, event, target)
             learn_seconds += perf_counter() - started_at

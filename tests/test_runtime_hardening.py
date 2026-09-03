@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from everbench import artifacts
 from everbench.api import task_source_url, validation_examples
 from everbench.batching import TimedBatch
-from everbench.model_process import IsolatedModel
 from everbench.models import PickledModel, prediction_for, validate_model
 from everbench.tasks import TaskDefinition
 from everbench.workers import _load_model
@@ -59,13 +58,6 @@ class BrokenProbabilityModel:
         return 0.25
 
 
-class SlowModel:
-    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
-        del event_id, event
-        time.sleep(2)
-        return 0.5
-
-
 class RuntimeHardeningTest(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "test-signing-key"
@@ -81,10 +73,7 @@ class RuntimeHardeningTest(unittest.TestCase):
         ):
             model, snapshot = _load_model(cast(Session, None), cast(TaskDefinition, task), registration)
         self.assertIsNone(snapshot)
-        try:
-            self.assertEqual(model.predict_one("event", {}), 0.5)
-        finally:
-            model.close()
+        self.assertEqual(model.predict_one("event", {}), 0.5)
 
     def test_task_source_url_links_to_the_checked_in_definition(self) -> None:
         task = SimpleNamespace(__file__=Path("tasks/dummy/task.py").resolve())
@@ -153,12 +142,6 @@ class RuntimeHardeningTest(unittest.TestCase):
 
         with self.assertRaisesRegex(AttributeError, "internal typo"):
             prediction_for(task, model, "event-1", {})
-
-    def test_isolated_model_enforces_operation_timeout(self) -> None:
-        payload = artifacts.dumps(SlowModel())
-        with IsolatedModel("slow", payload, artifacts.sign(payload), timeout_seconds=0.5) as model:
-            with self.assertRaisesRegex(TimeoutError, "operation limit"):
-                model.predict_one("event-1", {})
 
 
 if __name__ == "__main__":
