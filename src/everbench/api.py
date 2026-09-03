@@ -2,26 +2,40 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import lru_cache, wraps
+from hmac import compare_digest
 from importlib.metadata import distributions
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, abort, g, jsonify, make_response, render_template, request, send_file
+from flask import (
+    Flask,
+    Response,
+    abort,
+    current_app,
+    g,
+    jsonify,
+    make_response,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+)
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
+from werkzeug.http import dump_options_header
 
 from everbench import archive, artifacts, store
-from everbench.config import CONFIG
+from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
-from everbench.models import validate_uploaded_model
+from everbench.model_process import IsolatedModel
+from everbench.models import validate_model
 from everbench.tasks import load_task_named
 
 
@@ -49,7 +63,8 @@ def sessions() -> sessionmaker[Session]:
 
 def _session() -> Session:
     if "db_session" not in g:
-        g.db_session = sessions()()
+        factory = current_app.extensions.get("everbench_sessions") or sessions()
+        g.db_session = factory()
     return g.db_session
 
 
@@ -65,7 +80,7 @@ def require_api_key(view: Callable) -> Callable:
         expected = os.getenv("EVERBENCH_API_KEY")
         if not expected:
             return jsonify(error="EVERBENCH_API_KEY is not configured"), 503
-        if request.headers.get("X-API-Key") != expected:
+        if not compare_digest(request.headers.get("X-API-Key", ""), expected):
             return jsonify(error="invalid API key"), 401
         return view(*args, **kwargs)
 
@@ -147,8 +162,13 @@ def task_snapshot(session: Session, task_name: str) -> dict[str, Any]:
     }
 
 
-def create_app() -> Flask:
+def create_app(
+    config: RuntimeConfig | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> Flask:
+    runtime_config = config or CONFIG
     app = Flask(__name__)
+    app.extensions["everbench_sessions"] = session_factory or sessions()
     app.teardown_appcontext(_close_session)
 
     def format_number(value: int) -> str:
@@ -201,16 +221,28 @@ def create_app() -> Flask:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/tasks/<task_name>/models/<model_id>/detail")
+    def model_detail(task_name: str, model_id: str) -> str:
+        detail = store.model_detail(_session(), task_name, model_id)
+        if detail is None:
+            abort(404)
+        return render_template("_model_detail.html", model=detail)
+
     @app.get("/api/tasks/<task_name>/archives/<content_sha256>")
     def download_archive(task_name: str, content_sha256: str) -> Response:
         manifest = store.task_archive(_session(), task_name, content_sha256)
         if manifest is None:
             abort(404)
-        return send_file(
-            io.BytesIO(archive_bytes(manifest)),
-            as_attachment=True,
-            download_name=f"{task_name}-{manifest.event_date.isoformat()}-{content_sha256[:12]}.parquet",
+        filename = f"{task_name}-{manifest.event_date.isoformat()}-{content_sha256[:12]}.parquet"
+        if not manifest.path.startswith("s3://"):
+            return send_file(manifest.path, as_attachment=True, download_name=filename)
+        response = Response(
+            stream_with_context(archive.stream_archive(manifest.path)), mimetype="application/octet-stream"
         )
+        if manifest.byte_size is not None:
+            response.content_length = manifest.byte_size
+        response.headers["Content-Disposition"] = dump_options_header("attachment", {"filename": filename})
+        return response
 
     @app.get("/api/health")
     def health() -> Response:
@@ -229,7 +261,7 @@ def create_app() -> Flask:
                     "role": heartbeat.role,
                     "status": heartbeat.status,
                     "last_seen_at": heartbeat.last_seen_at.isoformat(),
-                    "stale": (now - heartbeat.last_seen_at).total_seconds() > 45,
+                    "stale": (now - heartbeat.last_seen_at).total_seconds() > runtime_config.heartbeat_seconds * 2,
                 }
                 for heartbeat in store.worker_health(_session())
             ]
@@ -263,14 +295,16 @@ def create_app() -> Flask:
             return jsonify(error="model_id and owner are required form fields"), 400
         if not class_definition.strip():
             return jsonify(error="class_definition is required so the dashboard can show the model implementation"), 400
-        if len(class_definition.encode()) > CONFIG.max_class_definition_bytes:
-            return jsonify(error=f"class_definition must be at most {CONFIG.max_class_definition_bytes} bytes"), 413
+        if len(class_definition.encode()) > runtime_config.max_class_definition_bytes:
+            return jsonify(
+                error=f"class_definition must be at most {runtime_config.max_class_definition_bytes} bytes"
+            ), 413
         if metadata is None:
             return jsonify(error="metadata must be a JSON object"), 400
-        payload = uploaded.read(CONFIG.max_model_bytes + 1)
+        payload = uploaded.read(runtime_config.max_model_bytes + 1)
         signature = request.headers.get("X-Everbench-Artifact-Signature", "")
-        if not payload or len(payload) > CONFIG.max_model_bytes:
-            return jsonify(error=f"model must be between 1 and {CONFIG.max_model_bytes} bytes"), 413
+        if not payload or len(payload) > runtime_config.max_model_bytes:
+            return jsonify(error=f"model must be between 1 and {runtime_config.max_model_bytes} bytes"), 413
         try:
             is_trusted = artifacts.verify(payload, signature)
         except RuntimeError as error:
@@ -278,10 +312,16 @@ def create_app() -> Flask:
         if not is_trusted:
             return jsonify(error="invalid model signature"), 400
         session = _session()
+        examples = validation_examples(session, task_name)
         try:
-            examples = validation_examples(session, task_name)
-            example_count = validate_uploaded_model(task, payload, signature, examples)
-            class_name = type(artifacts.loads(payload, signature)).__name__
+            with IsolatedModel(
+                "validation", payload, signature, runtime_config.max_model_operation_seconds
+            ) as candidate:
+                example_count = validate_model(task, candidate, examples)
+                class_name = candidate.class_name
+        except Exception as error:
+            return jsonify(error=f"model validation failed: {error}"), 422
+        try:
             metadata = {
                 **metadata,
                 "class_definition": class_definition,
@@ -290,11 +330,12 @@ def create_app() -> Flask:
             artifact_record = store.store_artifact(session, payload, signature, metadata)
             definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
             store.record_artifact_validation(artifact_record, task_name, definition, example_count)
+            store.lock_model_registrations(session, task_name)
             existing = store.model_registration(session, task_name, model_id.strip())
             if (existing is None or not existing.active) and store.active_model_count(
                 session, task_name
-            ) >= CONFIG.max_active_models_per_task:
-                raise ValueError(f"a task may have at most {CONFIG.max_active_models_per_task} active models")
+            ) >= runtime_config.max_active_models_per_task:
+                raise ValueError(f"a task may have at most {runtime_config.max_active_models_per_task} active models")
             registration, created = store.register_model(
                 session, task_name, model_id.strip(), owner.strip(), artifact_record.artifact_id
             )
@@ -302,9 +343,9 @@ def create_app() -> Flask:
         except ValueError as error:
             session.rollback()
             return jsonify(error=str(error)), 409
-        except Exception as error:
+        except Exception:
             session.rollback()
-            return jsonify(error=f"model validation failed: {error}"), 422
+            raise
         response = registration_response(registration)
         response["created"] = created
         response["validation_examples"] = example_count
@@ -331,15 +372,15 @@ def create_app() -> Flask:
             return jsonify(error="multipart form field 'model' is required"), 400
         if not isinstance(archive_sha256, str) or not archive_sha256:
             return jsonify(error="archive_sha256 is required"), 400
-        payload = uploaded.read(CONFIG.max_model_bytes + 1)
+        payload = uploaded.read(runtime_config.max_model_bytes + 1)
         signature = request.headers.get("X-Everbench-Artifact-Signature", "")
-        if not payload or len(payload) > CONFIG.max_model_bytes:
-            return jsonify(error=f"model must be between 1 and {CONFIG.max_model_bytes} bytes"), 413
+        if not payload or len(payload) > runtime_config.max_model_bytes:
+            return jsonify(error=f"model must be between 1 and {runtime_config.max_model_bytes} bytes"), 413
         try:
-            uploaded_model = artifacts.loads(payload, signature)
+            is_trusted = artifacts.verify(payload, signature)
         except RuntimeError as error:
             return jsonify(error=str(error)), 503
-        except ValueError:
+        if not is_trusted:
             return jsonify(error="invalid model signature"), 400
         session = _session()
         manifest = store.task_archive(session, task_name, archive_sha256)
@@ -351,12 +392,14 @@ def create_app() -> Flask:
             )
         except OSError:
             return jsonify(error="archive is unavailable"), 404
-        if manifest.row_count > CONFIG.max_backtest_rows:
-            return jsonify(error=f"archive exceeds the {CONFIG.max_backtest_rows:,}-row backtest limit"), 413
-        if archive_bytes_count > CONFIG.max_backtest_bytes:
-            return jsonify(error=f"archive exceeds the {CONFIG.max_backtest_bytes:,}-byte backtest limit"), 413
+        if manifest.row_count > runtime_config.max_backtest_rows:
+            return jsonify(error=f"archive exceeds the {runtime_config.max_backtest_rows:,}-row backtest limit"), 413
+        if archive_bytes_count > runtime_config.max_backtest_bytes:
+            return jsonify(error=f"archive exceeds the {runtime_config.max_backtest_bytes:,}-byte backtest limit"), 413
+        data = archive_bytes(manifest)
         try:
-            result = archive.replay_archive(task, uploaded_model, archive_bytes(manifest))
+            with IsolatedModel("backtest", payload, signature, runtime_config.max_model_operation_seconds) as candidate:
+                result = archive.replay_model(task, candidate, data)
         except Exception as error:
             return jsonify(error=f"backtest failed: {error}"), 422
         return jsonify(archive_sha256=manifest.content_sha256, **result)

@@ -7,6 +7,8 @@ Run it through the generic harness:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from river import metrics
 
 TASK_NAME = "wiki-liftwing"
@@ -40,6 +42,14 @@ def accepts_event(event: dict) -> bool:
         and event.get("namespace") == 0
         and event_id(event) is not None
     )
+
+
+def label_timestamp(event: dict) -> float:
+    """Use source time so reconnect lag cannot turn a timely positive into a late one."""
+    value = (event.get("meta") or {}).get("dt")
+    if not isinstance(value, str):
+        raise ValueError("revision tag events must contain meta.dt")
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 def metric_inputs_for(metric: object, y_true: int, prediction: float) -> tuple[bool, bool | float]:

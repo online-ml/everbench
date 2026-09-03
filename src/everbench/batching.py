@@ -44,7 +44,7 @@ class TimedBatch(Generic[Item]):
         with self._lock:
             if self.items and time.monotonic() - self.opened_at >= self.max_age_seconds:
                 return self._flush_locked()
-            return True
+            return False
 
     def _flush_locked(self) -> bool:
         if not self.items:

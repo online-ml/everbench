@@ -9,16 +9,26 @@ import signal
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from types import FrameType, ModuleType
+from types import FrameType
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench.archive import archive_once, storage_configured
 from everbench.config import CONFIG
 from everbench.hotstore import HotStore
+from everbench.tasks import TaskDefinition
 from everbench.workers import Heartbeat, collect_events, collect_labels, learner
 
 Failure = tuple[str, BaseException]
+
+
+def _log_failure(context: str, name: str, error: BaseException) -> None:
+    logging.error(
+        "%s %s failed",
+        context,
+        name,
+        exc_info=(type(error), error, error.__traceback__),
+    )
 
 
 def _supervised(
@@ -74,7 +84,7 @@ def _run_threads(
                 name, error = failures.get(timeout=0.2)
             except queue.Empty:
                 continue
-            logging.exception("%s %s failed", failure_context, name, exc_info=error)
+            _log_failure(failure_context, name, error)
             stop.set()
             raise error
         try:
@@ -82,7 +92,7 @@ def _run_threads(
         except queue.Empty:
             pass
         else:
-            logging.exception("%s %s failed", failure_context, name, exc_info=error)
+            _log_failure(failure_context, name, error)
             raise error
     finally:
         stop.set()
@@ -96,7 +106,7 @@ def _run_threads(
 
 def run_task(
     sessions: sessionmaker[Session],
-    task: ModuleType,
+    task: TaskDefinition,
     *,
     stop: threading.Event | None = None,
     install_signal_handlers: bool = True,
@@ -156,7 +166,7 @@ def run_task(
         _run_threads(stop, failures, threads, failure_context="task runtime")
 
 
-def run_tasks(sessions: sessionmaker[Session], tasks: list[ModuleType]) -> None:
+def run_tasks(sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -> None:
     """Run all task runtimes in one Railway worker process.
 
     One process lets each task keep its hot store in RAM, while the shared
@@ -169,7 +179,7 @@ def run_tasks(sessions: sessionmaker[Session], tasks: list[ModuleType]) -> None:
     stop = threading.Event()
     failures: queue.SimpleQueue[Failure] = queue.SimpleQueue()
 
-    def run(task: ModuleType) -> None:
+    def run(task: TaskDefinition) -> None:
         try:
             run_task(sessions, task, stop=stop, install_signal_handlers=False)
             if not stop.is_set():

@@ -2,35 +2,37 @@
 
 from __future__ import annotations
 
-import copy
-from types import ModuleType
 from typing import Any
 
 from everbench import artifacts
 from everbench.metrics import MetricTracker
+from everbench.tasks import TaskDefinition
 
 
-def prediction_for(task: ModuleType, model: Any, event_id: str, event: dict[str, Any]) -> Any:
+def prediction_for(task: TaskDefinition, model: Any, event_id: str, event: dict[str, Any]) -> Any:
     """Apply a task's prediction semantics to a model."""
     if task.PROBLEM_TYPE in {"binary_classification", "multiclass_classification"}:
-        try:
+        if _supports(model, "supports_probabilities", "predict_proba_one"):
             probabilities = model.predict_proba_one(event_id, event)
-        except AttributeError:
-            return model.predict_one(event_id, event)
-        if task.PROBLEM_TYPE == "multiclass_classification":
-            return probabilities
-        return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
+            if task.PROBLEM_TYPE == "multiclass_classification":
+                return probabilities
+            return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
+        return model.predict_one(event_id, event)
     if task.PROBLEM_TYPE == "anomaly_detection":
-        try:
+        if _supports(model, "supports_scoring", "score_one"):
             return model.score_one(event_id, event)
-        except AttributeError:
-            return model.predict_one(event_id, event)
+        return model.predict_one(event_id, event)
     return model.predict_one(event_id, event)
 
 
-def metric_inputs_for(task: ModuleType, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
+def _supports(model: Any, capability: str, method: str) -> bool:
+    declared = getattr(model, capability, None)
+    return declared if isinstance(declared, bool) else callable(getattr(model, method, None))
+
+
+def metric_inputs_for(task: TaskDefinition, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
     """Let a task adapt a stored prediction to a metric's expected input."""
-    hook = getattr(task, "metric_inputs_for", None)
+    hook = task.metric_inputs_for
     return hook(metric, y_true, prediction) if hook is not None else (y_true, prediction)
 
 
@@ -51,6 +53,14 @@ class PickledModel:
     @property
     def supports_learning(self) -> bool:
         return callable(getattr(self.model, "learn_one", None))
+
+    @property
+    def supports_probabilities(self) -> bool:
+        return callable(self._predict_proba_one)
+
+    @property
+    def supports_scoring(self) -> bool:
+        return callable(self._score_one)
 
     def predict_one(self, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._predict_one):
@@ -83,18 +93,12 @@ def supports_learning(model: Any) -> bool:
     return capability if isinstance(capability, bool) else callable(getattr(model, "learn_one", None))
 
 
-def validate_uploaded_model(
-    task: ModuleType,
-    payload: bytes,
-    signature: str,
+def validate_model(
+    task: TaskDefinition,
+    candidate: Any,
     examples: list[tuple[str, dict[str, Any], object]],
 ) -> int:
-    """Check a signed upload against available labelled examples without mutating it.
-
-    This deliberately lives alongside the model protocol: the validation is a
-    generic protocol check, not a separate model subsystem.
-    """
-    candidate = PickledModel("validation", copy.deepcopy(artifacts.loads(payload, signature)))
+    """Check a model protocol against recent examples."""
     if not examples:
         return 0
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)

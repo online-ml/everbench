@@ -12,8 +12,8 @@ TASK = """
 from river import metrics
 
 TASK_NAME = "{name}"
-EVENT_STREAM_URL = None
-LABEL_STREAM_URL = None
+EVENT_STREAM_URL = "https://example.test/events"
+LABEL_STREAM_URL = "https://example.test/labels"
 PROBLEM_TYPE = "binary_classification"
 METRICS = [metrics.ROCAUC()]
 DESCRIPTION_HTML = "test"
@@ -57,7 +57,10 @@ class TaskDiscoveryTest(unittest.TestCase):
             "rev_id": 123,
             "tags": ["visualeditor", "mw-reverted"],
             "prior_state": {"tags": ["visualeditor"]},
+            "meta": {"dt": "2026-09-03T12:34:56Z"},
         }
 
         self.assertEqual(task.NEGATIVE_LABEL_DELAY_SECONDS, 48 * 60 * 60)
         self.assertEqual(task.label_for(event), ("enwiki:123", 1, "mw-reverted"))
+        assert task.label_timestamp is not None
+        self.assertEqual(task.label_timestamp(event), 1_788_438_896.0)

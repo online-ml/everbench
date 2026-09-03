@@ -7,11 +7,11 @@ import hashlib
 import io
 import json
 import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
-from types import ModuleType
 from typing import Any
 
 import boto3
@@ -23,6 +23,7 @@ from everbench import store
 from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
 from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
+from everbench.tasks import TaskDefinition
 
 
 def storage_configured() -> bool:
@@ -68,8 +69,29 @@ def read_archive(location: str) -> bytes:
         bucket, key = location.removeprefix("s3://").split("/", 1)
         if bucket != CONFIG.s3_bucket_name:
             raise FileNotFoundError("archive is not in the configured R2 bucket")
-        return _s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+        body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            return body.read()
+        finally:
+            body.close()
     return Path(location).read_bytes()
+
+
+def stream_archive(location: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+    """Yield an archive without buffering the entire object in web-process memory."""
+    if location.startswith("s3://"):
+        bucket, key = location.removeprefix("s3://").split("/", 1)
+        if bucket != CONFIG.s3_bucket_name:
+            raise FileNotFoundError("archive is not in the configured R2 bucket")
+        body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            yield from body.iter_chunks(chunk_size=chunk_size)
+        finally:
+            body.close()
+        return
+    with Path(location).open("rb") as source:
+        while chunk := source.read(chunk_size):
+            yield chunk
 
 
 def archive_size(location: str) -> int:
@@ -81,7 +103,7 @@ def archive_size(location: str) -> int:
     return Path(location).stat().st_size
 
 
-def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
+def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
     """Backtest an uploaded model against an archive.
 
     An event creates a prediction at ``event_available_at``. Its label only
@@ -90,6 +112,11 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
     archived row as an immediately labelled example.
     """
     model = PickledModel("backtest", copy.deepcopy(uploaded_model))
+    return replay_model(task, model, path)
+
+
+def replay_model(task: TaskDefinition, model: Any, path: Path | bytes) -> dict[str, Any]:
+    """Backtest an already-adapted model, including isolated model processes."""
 
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
@@ -161,7 +188,7 @@ def _record(row: dict) -> dict:
     }
 
 
-def archive_once(sessions: sessionmaker[Session], task: ModuleType) -> int:
+def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """Archive one eligible weekly partition batch, returning its event count.
 
     Files have a deterministic content-hash name. A crash after file creation
@@ -179,7 +206,8 @@ def archive_once(sessions: sessionmaker[Session], task: ModuleType) -> int:
     if not rows:
         return 0
     records = [_record(row) for row in rows]
-    content_sha256 = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    identity = {"task_name": task.TASK_NAME, "records": records}
+    content_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     buffer = io.BytesIO()
     pq.write_table(pa.Table.from_pylist(records), buffer, compression="zstd")
     location, byte_size = _publish(task.TASK_NAME, week_start.isoformat(), content_sha256, buffer.getvalue())

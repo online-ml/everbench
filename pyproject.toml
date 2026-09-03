@@ -9,6 +9,8 @@ dependencies = [
     "cloudpickle>=3.1,<4",
     "flask>=3.1,<4",
     "gunicorn>=23,<24",
+    "httpx>=0.28,<1",
+    "httpx-sse>=0.4,<0.5",
     "psycopg[binary]>=3.2,<4",
     "pyarrow>=18,<20",
     "python-dotenv>=1.0,<2",
@@ -26,6 +28,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "prek>=0.5.2",
+    "pytest>=9.1.1",
     "ruff>=0.16.5",
     "ty>=0.0.77",
 ]

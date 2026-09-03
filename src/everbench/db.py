@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from hashlib import blake2b
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -27,15 +28,23 @@ def sqlalchemy_url(url: str | None = None) -> str:
 
 
 def make_engine(url: str | None = None) -> Engine:
-    # Each Railway worker is single-process; a tiny pool avoids needlessly
-    # occupying Postgres connections while preserving reconnect resilience.
+    # Each Railway worker is single-process. Keep enough connections for its
+    # collectors, compactor, heartbeat, and connection-pinned learners.
     return create_engine(
         sqlalchemy_url(url),
         pool_pre_ping=True,
-        pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "2")),
+        # Each learner pins one connection while holding its advisory lock.
+        # Leave capacity for collectors, heartbeats, and archive work.
+        pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "10")),
         max_overflow=0,
     )
 
 
 def make_session_factory(url: str | None = None) -> sessionmaker[Session]:
     return sessionmaker(make_engine(url), expire_on_commit=False)
+
+
+def advisory_key(*parts: str) -> int:
+    """Map a namespaced application identity onto PostgreSQL's signed bigint keyspace."""
+    digest = blake2b("\0".join(parts).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)

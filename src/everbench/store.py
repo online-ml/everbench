@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -12,21 +13,35 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from everbench import artifacts
+from everbench.db import advisory_key
 from everbench.schema import (
     ArchiveManifest,
     BenchmarkEvent,
     BenchmarkLabel,
     MetricState,
-    MetricUpdate,
     ModelArtifact,
+    ModelEventState,
     ModelRegistration,
     ModelSnapshot,
-    Prediction,
-    PredictionSkip,
     StreamCursor,
-    Training,
     WorkerHeartbeat,
 )
+
+
+@dataclass(frozen=True)
+class LabelInput:
+    event_id: str
+    y: Any
+    reason: str
+    available_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+def lock_task_ingest(session: Session, task_name: str) -> None:
+    """Serialize a task's event, label, and horizon-finalizer writes."""
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": advisory_key("ingest", task_name)},
+    )
 
 
 def add_events(
@@ -65,11 +80,12 @@ def add_events(
                      AND label.event_id = ANY(CAST(:event_ids AS text[]))
                      AND event.task_name = label.task_name AND event.event_id = label.event_id
                      AND label.y = '1'::jsonb
-                     AND event.event_time <= now() - make_interval(secs => :delay_seconds)"""
+                     AND label.available_at
+                         > event.event_time + make_interval(secs => :delay_seconds)"""
             ),
             {
                 "task_name": task_name,
-                "event_ids": [event_id for event_id, _, _ in events],
+                "event_ids": inserted_event_ids,
                 "delay_seconds": delay_seconds,
             },
         )
@@ -97,9 +113,24 @@ def add_expired_negative_labels(session: Session, task_name: str, delay_seconds:
     )
 
 
-def add_labels(
-    session: Session, task_name: str, labels: list[tuple[str, Any, str]], delay_seconds: float | None
-) -> list[str]:
+def purge_orphan_labels(session: Session, task_name: str, cutoff: datetime) -> int:
+    """Bound the label inbox when a corresponding accepted event never arrives."""
+    result = session.execute(
+        text(
+            """DELETE FROM benchmark_labels AS label
+                 WHERE label.task_name = :task_name AND label.inserted_at < :cutoff
+                   AND NOT EXISTS (
+                     SELECT 1 FROM benchmark_events AS event
+                      WHERE event.task_name = label.task_name AND event.event_id = label.event_id
+                   )
+               RETURNING label.event_id"""
+        ),
+        {"task_name": task_name, "cutoff": cutoff},
+    )
+    return len(list(result.scalars()))
+
+
+def add_labels(session: Session, task_name: str, labels: list[LabelInput], delay_seconds: float | None) -> list[str]:
     """Insert a label-collector batch with one Postgres statement.
 
     A positive label arriving after its configured horizon is ignored: the
@@ -113,21 +144,29 @@ def add_labels(
             for event_id, event_time in session.execute(
                 select(BenchmarkEvent.event_id, BenchmarkEvent.event_time).where(
                     BenchmarkEvent.task_name == task_name,
-                    BenchmarkEvent.event_id.in_([event_id for event_id, _, _ in labels]),
+                    BenchmarkEvent.event_id.in_([label.event_id for label in labels]),
                 )
             )
             if event_id is not None and event_time is not None
         }
-        cutoff = datetime.now(UTC) - timedelta(seconds=delay_seconds)
         labels = [
-            (event_id, y, reason)
-            for event_id, y, reason in labels
-            if event_id not in event_times or y != 1 or event_times[event_id] > cutoff
+            label
+            for label in labels
+            if label.event_id not in event_times
+            or label.y != 1
+            or label.available_at <= event_times[label.event_id] + timedelta(seconds=delay_seconds)
         ]
         if not labels:
             return []
     values = [
-        {"task_name": task_name, "event_id": event_id, "y": y, "reason": reason} for event_id, y, reason in labels
+        {
+            "task_name": task_name,
+            "event_id": label.event_id,
+            "y": label.y,
+            "reason": label.reason,
+            "available_at": label.available_at,
+        }
+        for label in labels
     ]
     statement = (
         insert(BenchmarkLabel)
@@ -159,6 +198,7 @@ def runnable_registrations(session: Session, task_name: str) -> list[ModelRegist
                 (ModelRegistration.disabled_until.is_(None)) | (ModelRegistration.disabled_until <= func.now()),
             )
             .order_by(ModelRegistration.model_id)
+            .with_for_update()
         )
     )
 
@@ -175,6 +215,7 @@ def disabled_registrations(session: Session, task_name: str) -> list[ModelRegist
                 ModelRegistration.disabled_until > func.now(),
             )
             .order_by(ModelRegistration.model_id)
+            .with_for_update()
         )
     )
 
@@ -202,18 +243,11 @@ def untrained_labels(
             """SELECT label.event_id, label.y, label.available_at, event.sequence
                FROM benchmark_labels AS label
                JOIN benchmark_events AS event USING (task_name, event_id)
-               LEFT JOIN benchmark_predictions AS prediction
-                 ON prediction.task_name = label.task_name AND prediction.event_id = label.event_id
-                 AND prediction.model_id = :model_id
-               LEFT JOIN benchmark_prediction_skips AS prediction_skip
-                 ON prediction_skip.task_name = label.task_name AND prediction_skip.event_id = label.event_id
-                 AND prediction_skip.model_id = :model_id
-               LEFT JOIN benchmark_trainings AS training
-                 ON training.task_name = label.task_name AND training.event_id = label.event_id
-                 AND training.model_id = :model_id
+               JOIN benchmark_model_events AS model_event
+                 ON model_event.task_name = label.task_name AND model_event.event_id = label.event_id
+                 AND model_event.model_id = :model_id
                WHERE label.task_name = :task_name
-                 AND (prediction.event_id IS NOT NULL OR prediction_skip.event_id IS NOT NULL)
-                 AND training.event_id IS NULL
+                 AND model_event.trained_at IS NULL
                ORDER BY label.available_at, event.sequence LIMIT :limit"""
         ),
         {"task_name": task_name, "model_id": model_id, "limit": limit},
@@ -225,15 +259,13 @@ def unevaluated_labels(session: Session, task_name: str, model_id: str, limit: i
     """Return labelled predictions not yet incorporated into River metrics."""
     rows = session.execute(
         text(
-            """SELECT label.event_id, label.y, prediction.prediction
+            """SELECT label.event_id, label.y, model_event.prediction
                FROM benchmark_labels AS label
                JOIN benchmark_events AS event USING (task_name, event_id)
-               JOIN benchmark_predictions AS prediction USING (task_name, event_id)
-               LEFT JOIN benchmark_metric_updates AS metric_update
-                 ON metric_update.task_name = label.task_name AND metric_update.event_id = label.event_id
-                 AND metric_update.model_id = :model_id
-               WHERE label.task_name = :task_name AND prediction.model_id = :model_id
-                 AND metric_update.event_id IS NULL
+               JOIN benchmark_model_events AS model_event USING (task_name, event_id)
+               WHERE label.task_name = :task_name AND model_event.model_id = :model_id
+                 AND model_event.prediction_status = 'predicted'
+                 AND model_event.evaluated_at IS NULL
                ORDER BY label.available_at, event.sequence LIMIT :limit"""
         ),
         {"task_name": task_name, "model_id": model_id, "limit": limit},
@@ -242,55 +274,47 @@ def unevaluated_labels(session: Session, task_name: str, model_id: str, limit: i
 
 
 def add_trainings(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> list[str]:
-    if event_ids:
-        return list(
-            session.scalars(
-                insert(Training)
-                .values(
-                    [{"task_name": task_name, "event_id": event_id, "model_id": model_id} for event_id in event_ids]
-                )
-                .on_conflict_do_nothing()
-                .returning(Training.event_id)
-            )
+    if not event_ids:
+        return []
+    return list(
+        session.scalars(
+            text(
+                """UPDATE benchmark_model_events
+                     SET trained_at = now()
+                   WHERE task_name = :task_name AND model_id = :model_id
+                     AND event_id = ANY(CAST(:event_ids AS text[]))
+                     AND trained_at IS NULL
+                   RETURNING event_id"""
+            ),
+            {"task_name": task_name, "model_id": model_id, "event_ids": event_ids},
         )
-    return []
+    )
 
 
 def add_metric_updates(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> None:
     if event_ids:
         session.execute(
-            insert(MetricUpdate)
-            .values([{"task_name": task_name, "event_id": event_id, "model_id": model_id} for event_id in event_ids])
-            .on_conflict_do_nothing()
+            text(
+                """UPDATE benchmark_model_events
+                     SET evaluated_at = now()
+                   WHERE task_name = :task_name AND model_id = :model_id
+                     AND event_id = ANY(CAST(:event_ids AS text[]))
+                     AND prediction_status = 'predicted' AND evaluated_at IS NULL"""
+            ),
+            {"task_name": task_name, "model_id": model_id, "event_ids": event_ids},
         )
 
 
 def _model_processing_pending_clause() -> str:
     """SQL predicate for work that prevents a labelled event from archiving."""
     return """(
-        (NOT EXISTS (
-          SELECT 1 FROM benchmark_predictions AS prediction
-          WHERE prediction.task_name = event.task_name AND prediction.event_id = event.event_id
-            AND prediction.model_id = model.model_id
-        ) AND NOT EXISTS (
-          SELECT 1 FROM benchmark_prediction_skips AS prediction_skip
-          WHERE prediction_skip.task_name = event.task_name AND prediction_skip.event_id = event.event_id
-            AND prediction_skip.model_id = model.model_id
-        ))
-        OR NOT EXISTS (
-          SELECT 1 FROM benchmark_trainings AS training
-          WHERE training.task_name = event.task_name AND training.event_id = event.event_id
-            AND training.model_id = model.model_id
+        NOT EXISTS (
+          SELECT 1 FROM benchmark_model_events AS model_event
+          WHERE model_event.task_name = event.task_name AND model_event.event_id = event.event_id
+            AND model_event.model_id = model.model_id
+            AND model_event.trained_at IS NOT NULL
+            AND (model_event.prediction_status = 'skipped' OR model_event.evaluated_at IS NOT NULL)
         )
-        OR (EXISTS (
-          SELECT 1 FROM benchmark_predictions AS prediction
-          WHERE prediction.task_name = event.task_name AND prediction.event_id = event.event_id
-            AND prediction.model_id = model.model_id
-        ) AND NOT EXISTS (
-          SELECT 1 FROM benchmark_metric_updates AS metric_update
-          WHERE metric_update.task_name = event.task_name AND metric_update.event_id = event.event_id
-            AND metric_update.model_id = model.model_id
-        ))
         OR NOT EXISTS (
           SELECT 1 FROM model_snapshots AS snapshot
           WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
@@ -342,16 +366,13 @@ def unpredicted_events(
         text(
             """SELECT event.event_id
                FROM benchmark_events AS event
-               LEFT JOIN benchmark_predictions AS prediction
-                 ON prediction.task_name = event.task_name AND prediction.event_id = event.event_id
-                 AND prediction.model_id = :model_id
-               LEFT JOIN benchmark_prediction_skips AS prediction_skip
-                 ON prediction_skip.task_name = event.task_name AND prediction_skip.event_id = event.event_id
-                 AND prediction_skip.model_id = :model_id
+               LEFT JOIN benchmark_model_events AS model_event
+                 ON model_event.task_name = event.task_name AND model_event.event_id = event.event_id
+                 AND model_event.model_id = :model_id
                LEFT JOIN benchmark_labels AS label
                  ON label.task_name = event.task_name AND label.event_id = event.event_id
                WHERE event.task_name = :task_name AND event.sequence >= :start_sequence
-                 AND prediction.event_id IS NULL AND prediction_skip.event_id IS NULL
+                 AND model_event.event_id IS NULL
                  AND label.event_id IS NULL
                ORDER BY event.sequence LIMIT :limit"""
         ),
@@ -397,14 +418,11 @@ def labelled_unpredicted_events(
             """SELECT event.event_id
                FROM benchmark_events AS event
                JOIN benchmark_labels AS label USING (task_name, event_id)
-               LEFT JOIN benchmark_predictions AS prediction
-                 ON prediction.task_name = event.task_name AND prediction.event_id = event.event_id
-                 AND prediction.model_id = :model_id
-               LEFT JOIN benchmark_prediction_skips AS prediction_skip
-                 ON prediction_skip.task_name = event.task_name AND prediction_skip.event_id = event.event_id
-                 AND prediction_skip.model_id = :model_id
+               LEFT JOIN benchmark_model_events AS model_event
+                 ON model_event.task_name = event.task_name AND model_event.event_id = event.event_id
+                 AND model_event.model_id = :model_id
                WHERE event.task_name = :task_name AND event.sequence >= :start_sequence
-                 AND prediction.event_id IS NULL AND prediction_skip.event_id IS NULL
+                 AND model_event.event_id IS NULL
                ORDER BY label.available_at, event.sequence LIMIT :limit"""
         ),
         {"task_name": task_name, "model_id": model_id, "start_sequence": start_sequence, "limit": limit},
@@ -422,15 +440,21 @@ def add_prediction_skips(
     if event_ids:
         return list(
             session.scalars(
-                insert(PredictionSkip)
+                insert(ModelEventState)
                 .values(
                     [
-                        {"task_name": task_name, "event_id": event_id, "model_id": model_id, "reason": reason}
+                        {
+                            "task_name": task_name,
+                            "event_id": event_id,
+                            "model_id": model_id,
+                            "prediction_status": "skipped",
+                            "prediction_reason": reason,
+                        }
                         for event_id in event_ids
                     ]
                 )
                 .on_conflict_do_nothing()
-                .returning(PredictionSkip.event_id)
+                .returning(ModelEventState.event_id)
             )
         )
     return []
@@ -447,8 +471,9 @@ def add_predictions(session: Session, task_name: str, model_id: str, predictions
     rows = json.dumps([{"event_id": event_id, "prediction": prediction} for event_id, prediction in predictions])
     inserted = session.execute(
         text(
-            """INSERT INTO benchmark_predictions (task_name, event_id, model_id, prediction)
-               SELECT :task_name, incoming.event_id, :model_id, incoming.prediction
+            """INSERT INTO benchmark_model_events
+                 (task_name, event_id, model_id, prediction, prediction_status)
+               SELECT :task_name, incoming.event_id, :model_id, incoming.prediction, 'predicted'
                FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS incoming(event_id text, prediction jsonb)
                LEFT JOIN benchmark_labels AS label
                  ON label.task_name = :task_name AND label.event_id = incoming.event_id
@@ -469,8 +494,12 @@ def model_prediction_count(session: Session, task_name: str, model_id: str) -> i
     return int(
         session.scalar(
             select(func.count())
-            .select_from(Prediction)
-            .where(Prediction.task_name == task_name, Prediction.model_id == model_id)
+            .select_from(ModelEventState)
+            .where(
+                ModelEventState.task_name == task_name,
+                ModelEventState.model_id == model_id,
+                ModelEventState.prediction_status == "predicted",
+            )
         )
         or 0
     )
@@ -539,6 +568,14 @@ def register_model(
     return registration, True
 
 
+def lock_model_registrations(session: Session, task_name: str) -> None:
+    """Serialize count-and-register operations for one task until transaction end."""
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": advisory_key("model-registration", task_name)},
+    )
+
+
 def _delete_unreferenced_artifacts(session: Session, artifact_ids: set[str]) -> None:
     if not artifact_ids:
         return
@@ -563,7 +600,7 @@ def delete_model(session: Session, task_name: str, model_id: str) -> bool:
             ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id
         )
     )
-    for model_table in (Prediction, PredictionSkip, Training, MetricUpdate, MetricState, ModelSnapshot):
+    for model_table in (MetricState, ModelSnapshot):
         session.execute(delete(model_table).where(model_table.task_name == task_name, model_table.model_id == model_id))
     artifact_ids = {artifact_id for artifact_id in (registration.artifact_id, snapshot_artifact_id) if artifact_id}
     session.delete(registration)
@@ -655,6 +692,8 @@ def record_disabled_work(
         session, task_name, registration.model_id, registration.start_sequence, max(limit - len(labelled), 0)
     )
     skipped_predictions = len(add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled"))
+    evaluations = unevaluated_labels(session, task_name, registration.model_id, limit)
+    add_metric_updates(session, task_name, registration.model_id, [event_id for event_id, *_ in evaluations])
     labels = untrained_labels(session, task_name, registration.model_id, limit)
     trained_event_ids = add_trainings(session, task_name, registration.model_id, [event_id for event_id, *_ in labels])
     skipped_labels = len(trained_event_ids)
@@ -734,10 +773,11 @@ def trained_examples_since_checkpoint(
     rows = session.execute(
         text(
             f"""SELECT event.event_id, event.event, label.y
-                 FROM benchmark_trainings AS training
+                 FROM benchmark_model_events AS model_event
                  JOIN benchmark_events AS event USING (task_name, event_id)
                  JOIN benchmark_labels AS label USING (task_name, event_id)
-                 WHERE training.task_name = :task_name AND training.model_id = :model_id
+                 WHERE model_event.task_name = :task_name AND model_event.model_id = :model_id
+                   AND model_event.trained_at IS NOT NULL
                    {watermark}
                  ORDER BY label.available_at, event.sequence"""
         ),
@@ -876,9 +916,7 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
-                      COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes,
-                      COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
-                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
+                      COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id
@@ -892,6 +930,27 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
         {"task_name": task_name},
     ).mappings()
     return [dict(row) for row in rows]
+
+
+def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, Any] | None:
+    row = (
+        session.execute(
+            text(
+                """SELECT model.model_id,
+                      model.owner,
+                      model.created_at,
+                      COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
+                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
+                 FROM benchmark_models AS model
+                 LEFT JOIN model_artifacts AS artifact ON artifact.artifact_id = model.artifact_id
+                WHERE model.task_name = :task_name AND model.model_id = :model_id AND model.active"""
+            ),
+            {"task_name": task_name, "model_id": model_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return dict(row) if row is not None else None
 
 
 def task_archives(session: Session, task_name: str) -> list[ArchiveManifest]:
@@ -936,7 +995,7 @@ def next_archive_week(session: Session, task_name: str, cutoff: datetime) -> dat
                      AND event.sequence >= model.start_sequence
                      AND {_model_processing_pending_clause()}
                  )
-               ORDER BY date_trunc('week', event.event_time AT TIME ZONE 'UTC') LIMIT 1"""
+               ORDER BY event.event_time LIMIT 1"""
         ),
         {"task_name": task_name, "cutoff": cutoff},
     )
@@ -952,7 +1011,8 @@ def archive_rows(
                FROM benchmark_events AS event
                JOIN benchmark_labels AS label USING (task_name, event_id)
                WHERE event.task_name = :task_name
-                 AND date_trunc('week', event.event_time AT TIME ZONE 'UTC')::date = :week_start
+                 AND event.event_time >= (CAST(:week_start AS date)::timestamp AT TIME ZONE 'UTC')
+                 AND event.event_time < (CAST(:week_start AS date)::timestamp AT TIME ZONE 'UTC') + INTERVAL '7 days'
                  AND event.event_time < :cutoff
                  AND NOT EXISTS (
                    SELECT 1 FROM benchmark_models AS model
@@ -986,5 +1046,5 @@ def record_archive(
 
 def purge_archived_events(session: Session, task_name: str, event_ids: list[str]) -> None:
     """Only call after a manifest was committed for a durable archive target."""
-    for model in (MetricUpdate, Training, PredictionSkip, Prediction, BenchmarkLabel, BenchmarkEvent):
+    for model in (BenchmarkLabel, BenchmarkEvent):
         session.execute(delete(model).where(model.task_name == task_name, model.event_id.in_(event_ids)))

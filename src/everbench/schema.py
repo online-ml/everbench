@@ -9,10 +9,12 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKeyConstraint,
     Identity,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -32,7 +34,11 @@ class Base(DeclarativeBase):
 
 class BenchmarkEvent(Base):
     __tablename__ = "benchmark_events"
-    __table_args__ = (UniqueConstraint("task_name", "sequence"),)
+    __table_args__ = (
+        UniqueConstraint("task_name", "sequence"),
+        Index("benchmark_events_inserted_idx", "task_name", "inserted_at"),
+        Index("benchmark_events_time_idx", "task_name", "event_time"),
+    )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -44,60 +50,65 @@ class BenchmarkEvent(Base):
 
 class BenchmarkLabel(Base):
     __tablename__ = "benchmark_labels"
+    __table_args__ = (
+        Index("benchmark_labels_available_idx", "task_name", "available_at"),
+        Index("benchmark_labels_inserted_idx", "task_name", "inserted_at"),
+    )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     y: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class Prediction(Base):
-    __tablename__ = "benchmark_predictions"
+class ModelEventState(Base):
+    """One model's durable progress for one benchmark event."""
+
+    __tablename__ = "benchmark_model_events"
     __table_args__ = (
-        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
+        CheckConstraint("prediction_status IN ('predicted', 'skipped')", name="model_event_prediction_status"),
+        CheckConstraint(
+            "(prediction_status = 'predicted' AND prediction IS NOT NULL AND prediction_reason IS NULL) "
+            "OR (prediction_status = 'skipped' AND prediction IS NULL AND prediction_reason IS NOT NULL)",
+            name="model_event_prediction_payload",
+        ),
+        ForeignKeyConstraint(
+            ["task_name", "event_id"],
+            ["benchmark_events.task_name", "benchmark_events.event_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["task_name", "model_id"],
+            ["benchmark_models.task_name", "benchmark_models.model_id"],
+            ondelete="CASCADE",
+        ),
+        Index("benchmark_model_events_model_idx", "task_name", "model_id", "event_id"),
     )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    prediction: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
+    prediction: Mapped[Any | None] = mapped_column(JSON_TYPE)
+    prediction_status: Mapped[str] = mapped_column(String, nullable=False)
+    prediction_reason: Mapped[str | None] = mapped_column(Text)
     predicted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class PredictionSkip(Base):
-    """Receipt for an event whose outcome arrived before prediction was possible."""
-
-    __tablename__ = "benchmark_prediction_skips"
-    __table_args__ = (
-        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
-    )
-
-    task_name: Mapped[str] = mapped_column(String, primary_key=True)
-    event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    skipped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class Training(Base):
-    """Receipt proving an online model has learned one labelled event."""
-
-    __tablename__ = "benchmark_trainings"
-    __table_args__ = (
-        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
-    )
-
-    task_name: Mapped[str] = mapped_column(String, primary_key=True)
-    event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MetricState(Base):
     """One operational metric checkpoint per (task, model)."""
 
     __tablename__ = "benchmark_metric_state"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_name", "model_id"],
+            ["benchmark_models.task_name", "benchmark_models.model_id"],
+            ondelete="CASCADE",
+        ),
+    )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -111,24 +122,11 @@ class MetricState(Base):
     )
 
 
-class MetricUpdate(Base):
-    """Receipt ensuring a prediction contributes to a metric exactly once."""
-
-    __tablename__ = "benchmark_metric_updates"
-    __table_args__ = (
-        ForeignKeyConstraint(["task_name", "event_id"], ["benchmark_events.task_name", "benchmark_events.event_id"]),
-    )
-
-    task_name: Mapped[str] = mapped_column(String, primary_key=True)
-    event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 class ModelRegistration(Base):
     """The per-task model identity, ownership, and operational status."""
 
     __tablename__ = "benchmark_models"
+    __table_args__ = (Index("benchmark_models_active_idx", "task_name", "active"),)
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -163,6 +161,13 @@ class ModelSnapshot(Base):
     """The single restart checkpoint for one model's learned state."""
 
     __tablename__ = "model_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_name", "model_id"],
+            ["benchmark_models.task_name", "benchmark_models.model_id"],
+            ondelete="CASCADE",
+        ),
+    )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)

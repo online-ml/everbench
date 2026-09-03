@@ -6,23 +6,25 @@ import logging
 import socket
 import threading
 import time
-import zlib
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from types import ModuleType
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import artifacts, store
+from everbench import store
 from everbench.batching import TimedBatch
 from everbench.config import CONFIG
+from everbench.db import advisory_key
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
-from everbench.models import PickledModel, metric_inputs_for, prediction_for, supports_learning
+from everbench.model_process import IsolatedModel
+from everbench.models import metric_inputs_for, prediction_for, supports_learning
 from everbench.sse import StreamMessage, subscribe
+from everbench.tasks import TaskDefinition
 
 
 class Heartbeat(AbstractContextManager):
@@ -63,9 +65,15 @@ class Heartbeat(AbstractContextManager):
         self.thread.join(timeout=2)
 
 
-def _timestamp(task: ModuleType, event: dict) -> float:
-    extractor = getattr(task, "event_timestamp", None)
+def _timestamp(task: TaskDefinition, event: dict) -> float:
+    extractor = task.event_timestamp
     return float(extractor(event) if extractor else event.get("timestamp", time.time()))
+
+
+def _label_timestamp(task: TaskDefinition, event: dict) -> datetime:
+    extractor = task.label_timestamp
+    timestamp = float(extractor(event)) if extractor else time.time()
+    return datetime.fromtimestamp(timestamp, UTC)
 
 
 @dataclass
@@ -74,7 +82,7 @@ class StreamCursorState:
 
 
 def _stream(
-    task: ModuleType,
+    task: TaskDefinition,
     source_name: str,
     stream_name: str,
     url: str,
@@ -82,7 +90,7 @@ def _stream(
     cursor_state: StreamCursorState | None,
 ):
     """Use a task's local generator when supplied, otherwise subscribe to SSE."""
-    source = getattr(task, source_name, None)
+    source = getattr(task, source_name)
     if source is not None:
         return (StreamMessage(payload=event, event_id=None) for event in source(stop))
     if cursor_state is None:
@@ -91,9 +99,9 @@ def _stream(
 
 
 def _cursor_state(
-    sessions: sessionmaker[Session], task: ModuleType, source_name: str, stream_name: str
+    sessions: sessionmaker[Session], task: TaskDefinition, source_name: str, stream_name: str
 ) -> StreamCursorState | None:
-    if getattr(task, source_name, None) is not None:
+    if getattr(task, source_name) is not None:
         return None
     with sessions() as session:
         return StreamCursorState(store.stream_cursor(session, task.TASK_NAME, stream_name))
@@ -139,19 +147,20 @@ def _cache_durable_events(
 
 def collect_events(
     sessions: sessionmaker[Session],
-    task: ModuleType,
+    task: TaskDefinition,
     stop: threading.Event | None = None,
     hot: HotStore | None = None,
     heartbeat: bool = True,
 ) -> None:
     stop = stop or threading.Event()
-    delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
+    delay_seconds = task.NEGATIVE_LABEL_DELAY_SECONDS
     cursor_state = _cursor_state(sessions, task, "event_stream", "events")
 
     def flush(items: list[tuple[tuple[str, float, dict[str, Any]] | None, str | None]]) -> None:
         events = [event for event, _ in items if event is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
+            store.lock_task_ingest(session, task.TASK_NAME)
             inserted_event_ids = store.add_events(session, task.TASK_NAME, events, delay_seconds)
             if cursor_state is not None and cursor is not None:
                 store.save_stream_cursor(session, task.TASK_NAME, "events", cursor)
@@ -186,37 +195,44 @@ def collect_events(
 
 def collect_labels(
     sessions: sessionmaker[Session],
-    task: ModuleType,
+    task: TaskDefinition,
     stop: threading.Event | None = None,
     hot: HotStore | None = None,
     heartbeat: bool = True,
 ) -> None:
     stop = stop or threading.Event()
-    delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
+    delay_seconds = task.NEGATIVE_LABEL_DELAY_SECONDS
     cursor_state = _cursor_state(sessions, task, "label_stream", "labels")
 
-    def finalize_negatives() -> None:
+    def maintain_labels() -> None:
         while not stop.is_set():
             try:
                 with sessions.begin() as session:
+                    store.lock_task_ingest(session, task.TASK_NAME)
                     event_ids = store.add_expired_negative_labels(session, task.TASK_NAME, delay_seconds)
+                    purged = store.purge_orphan_labels(
+                        session,
+                        task.TASK_NAME,
+                        datetime.now(UTC) - timedelta(days=CONFIG.label_inbox_retention_days),
+                    )
                 if event_ids:
                     if hot is not None:
                         hot.mark_labelled(event_ids)
                     logging.info("queued %d horizon labels", len(event_ids))
+                if purged:
+                    logging.info("purged %d expired orphan labels", purged)
             except Exception:
-                logging.exception("negative-label finalizer failed")
+                logging.exception("label maintenance failed")
             stop.wait(60)
 
-    finalizer: threading.Thread | None = None
-    if delay_seconds is not None:
-        finalizer = threading.Thread(target=finalize_negatives, name="negative-label-finalizer", daemon=True)
-        finalizer.start()
+    maintenance = threading.Thread(target=maintain_labels, name="label-maintenance", daemon=True)
+    maintenance.start()
 
-    def flush(items: list[tuple[tuple[str, Any, str] | None, str | None]]) -> None:
+    def flush(items: list[tuple[store.LabelInput | None, str | None]]) -> None:
         labels = [label for label, _ in items if label is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
+            store.lock_task_ingest(session, task.TASK_NAME)
             inserted_event_ids = store.add_labels(session, task.TASK_NAME, labels, delay_seconds)
             if cursor_state is not None and cursor is not None:
                 store.save_stream_cursor(session, task.TASK_NAME, "labels", cursor)
@@ -236,53 +252,55 @@ def collect_labels(
             ):
                 event = message.payload
                 label = task.label_for(event)
-                batch.add((label, message.event_id))
+                collected = store.LabelInput(*label, _label_timestamp(task, event)) if label is not None else None
+                batch.add((collected, message.event_id))
         finally:
             stop.set()
             timer.join(timeout=2)
-            if finalizer is not None:
-                finalizer.join(timeout=2)
+            maintenance.join(timeout=2)
             _flush_before_exit(batch)
 
 
 def _task_lock(task_name: str) -> int:
-    return zlib.crc32(task_name.encode())
+    return advisory_key("learner", task_name)
 
 
-def _load_model(session: Session, task: ModuleType, registration):
+def _load_model(session: Session, task: TaskDefinition, registration):
     snapshot = store.latest_snapshot(session, task.TASK_NAME, registration.model_id)
     artifact_record = store.artifact(session, snapshot.artifact_id) if snapshot is not None else None
     if artifact_record is None and registration.artifact_id:
         artifact_record = store.artifact(session, registration.artifact_id)
     if artifact_record is None:
         raise RuntimeError(f"pickle artifact missing for {registration.model_id}")
-    return PickledModel(
-        registration.model_id, artifacts.loads(artifact_record.payload, artifact_record.signature)
+    return IsolatedModel(
+        registration.model_id,
+        artifact_record.payload,
+        artifact_record.signature,
+        CONFIG.max_model_operation_seconds,
     ), snapshot
 
 
 @dataclass
 class CachedModel:
     fingerprint: tuple[Any, ...]
-    model: PickledModel
+    model: IsolatedModel
     tracker: MetricTracker
     checkpointed_at: float
 
 
-def _model_operation(model_id: str, operation: str, callback: Callable[[], Any]) -> Any:
-    """Apply a finite budget to model calls that return control to Python."""
-    started_at = time.monotonic()
-    result = callback()
-    elapsed = time.monotonic() - started_at
-    if elapsed > CONFIG.max_model_operation_seconds:
-        raise TimeoutError(
-            f"{model_id} {operation} took {elapsed:.1f}s; limit is {CONFIG.max_model_operation_seconds:.1f}s"
-        )
-    return result
+def _discard_cached(cache: dict[str, CachedModel], model_id: str) -> None:
+    cached = cache.pop(model_id, None)
+    if cached is not None:
+        cached.model.close()
+
+
+def _clear_cached(cache: dict[str, CachedModel]) -> None:
+    for model_id in list(cache):
+        _discard_cached(cache, model_id)
 
 
 def _restore_uncheckpointed_learning(
-    session: Session, task: ModuleType, registration, model: PickledModel, snapshot
+    session: Session, task: TaskDefinition, registration, model: IsolatedModel, snapshot
 ) -> None:
     """Recover labels learned after the last durable model checkpoint."""
     if not supports_learning(model):
@@ -299,9 +317,7 @@ def _restore_uncheckpointed_learning(
         snapshot.checkpoint_label_available_at if snapshot is not None else None,
         snapshot.checkpoint_event_sequence if snapshot is not None else None,
     ):
-        _model_operation(
-            model.model_id, "learn", lambda event_id=event_id, event=event, y=y: model.learn_one(event_id, event, y)
-        )
+        model.learn_one(event_id, event, y)
 
 
 def _events(session: Session, task_name: str, event_ids: list[str], hot: HotStore | None) -> dict[str, dict[str, Any]]:
@@ -320,19 +336,22 @@ def _events(session: Session, task_name: str, event_ids: list[str], hot: HotStor
     return {event_id: event for event_id, event in values.items() if event is not None}
 
 
-def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedModel]) -> list[tuple[Any, CachedModel]]:
+def _active_models(
+    session: Session, task: TaskDefinition, cache: dict[str, CachedModel]
+) -> list[tuple[Any, CachedModel]]:
     """Keep models resident while noticing API additions and deactivations."""
     registrations = store.runnable_registrations(session, task.TASK_NAME)
+    definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
     active_ids = {registration.model_id for registration in registrations}
     for model_id in set(cache) - active_ids:
-        del cache[model_id]
+        _discard_cached(cache, model_id)
     models = []
     for registration in registrations:
-        definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
         fingerprint = (registration.artifact_id, definition["fingerprint"])
         cached = cache.get(registration.model_id)
         try:
             if cached is None or cached.fingerprint != fingerprint:
+                _discard_cached(cache, registration.model_id)
                 persisted = store.model_metric_state(session, task.TASK_NAME, registration.model_id)
                 tracker = (
                     MetricTracker.restore(definition, persisted.state)
@@ -344,7 +363,11 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
                     )
                 )
                 model, snapshot = _load_model(session, task, registration)
-                _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
+                try:
+                    _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
+                except Exception:
+                    model.close()
+                    raise
                 # A legacy/no checkpoint must be upgraded on its next learning
                 # batch before source rows can be archived.
                 checkpointed_at = (
@@ -354,7 +377,7 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
                 )
                 cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
         except Exception as error:
-            cache.pop(registration.model_id, None)
+            _discard_cached(cache, registration.model_id)
             retry_at = store.record_model_failure(
                 session,
                 task.TASK_NAME,
@@ -370,7 +393,7 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
 
 
 def _learn_model(
-    session: Session, task: ModuleType, registration, cached: CachedModel, hot: HotStore | None
+    session: Session, task: TaskDefinition, registration, cached: CachedModel, hot: HotStore | None
 ) -> tuple[int, int, int]:
     """Process one model in the caller's savepoint."""
     model, tracker = cached.model, cached.tracker
@@ -392,11 +415,7 @@ def _learn_model(
     if supports_learning(model):
         label_events = _events(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
         for event_id, y, _, _ in labels:
-            _model_operation(
-                model.model_id,
-                "learn",
-                lambda event_id=event_id, y=y: model.learn_one(event_id, label_events[event_id], y),
-            )
+            model.learn_one(event_id, label_events[event_id], y)
     store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
     events = store.unpredicted_events(
         session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
@@ -405,11 +424,7 @@ def _learn_model(
     predictions = [
         (
             event_id,
-            _model_operation(
-                model.model_id,
-                "predict",
-                lambda event_id=event_id: prediction_for(task, model, event_id, prediction_events[event_id]),
-            ),
+            prediction_for(task, model, event_id, prediction_events[event_id]),
         )
         for event_id in events
     ]
@@ -444,7 +459,7 @@ def _learn_model(
 
 def learn_once(
     session: Session,
-    task: ModuleType,
+    task: TaskDefinition,
     cache: dict[str, CachedModel] | None = None,
     hot: HotStore | None = None,
     completed_hot_events: list[str] | None = None,
@@ -453,7 +468,7 @@ def learn_once(
     results = []
     initially_disabled_model_ids = set()
     for registration in store.disabled_registrations(session, task.TASK_NAME):
-        cache.pop(registration.model_id, None)
+        _discard_cached(cache, registration.model_id)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
         initially_disabled_model_ids.add(registration.model_id)
     for registration, cached in _active_models(session, task, cache):
@@ -461,7 +476,7 @@ def learn_once(
             with session.begin_nested():
                 trained, predicted, evaluated = _learn_model(session, task, registration, cached, hot)
         except Exception as error:
-            cache.pop(registration.model_id, None)
+            _discard_cached(cache, registration.model_id)
             retry_at = store.record_model_failure(
                 session,
                 task.TASK_NAME,
@@ -478,7 +493,7 @@ def learn_once(
     for registration in store.disabled_registrations(session, task.TASK_NAME):
         if registration.model_id in initially_disabled_model_ids:
             continue
-        cache.pop(registration.model_id, None)
+        _discard_cached(cache, registration.model_id)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     if hot is not None:
         completed = store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids())
@@ -491,7 +506,7 @@ def learn_once(
 
 def learner(
     sessions: sessionmaker[Session],
-    task: ModuleType,
+    task: TaskDefinition,
     once: bool = False,
     stop: threading.Event | None = None,
     hot: HotStore | None = None,
@@ -499,33 +514,52 @@ def learner(
 ) -> None:
     stop = stop or threading.Event()
     models: dict[str, CachedModel] = {}
-    with sessions() as session:
+    engine = sessions.kw.get("bind")
+    if engine is None:
+        raise RuntimeError("learner session factory is not bound to an engine")
+    # PostgreSQL session-level advisory locks belong to the physical connection,
+    # not the SQLAlchemy Session. Pin that connection until this learner exits.
+    with engine.connect() as connection, sessions(bind=connection) as session:
         acquired = session.scalar(
             text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _task_lock(task.TASK_NAME)}
         )
         if not acquired:
             raise RuntimeError(f"another learner is already running for {task.TASK_NAME}")
-        with Heartbeat(sessions, task.TASK_NAME, "learner") if heartbeat else nullcontext():
-            while not stop.is_set():
-                try:
-                    completed_hot_events: list[str] = []
-                    results = learn_once(session, task, models, hot, completed_hot_events)
-                    session.commit()
-                    if hot is not None:
-                        hot.discard(completed_hot_events)
-                    for model_id, trained, predicted, evaluated in results:
-                        if trained or predicted or evaluated:
-                            logging.info(
-                                "%s: trained=%d predicted=%d evaluated=%d", model_id, trained, predicted, evaluated
-                            )
-                except Exception:
-                    session.rollback()
-                    # A model can have learned in RAM before the surrounding
-                    # database transaction fails. Discard it so the next
-                    # cycle reloads the last committed checkpoint instead of
-                    # learning the same labels twice.
-                    models.clear()
-                    logging.exception("learner cycle failed")
-                if once:
-                    return
-                stop.wait(CONFIG.learner_idle_seconds)
+        session.commit()
+        try:
+            with Heartbeat(sessions, task.TASK_NAME, "learner") if heartbeat else nullcontext():
+                while not stop.is_set():
+                    try:
+                        completed_hot_events: list[str] = []
+                        results = learn_once(session, task, models, hot, completed_hot_events)
+                        session.commit()
+                        if hot is not None:
+                            hot.discard(completed_hot_events)
+                        for model_id, trained, predicted, evaluated in results:
+                            if trained or predicted or evaluated:
+                                logging.info(
+                                    "%s: trained=%d predicted=%d evaluated=%d",
+                                    model_id,
+                                    trained,
+                                    predicted,
+                                    evaluated,
+                                )
+                    except Exception:
+                        session.rollback()
+                        # A model can have learned in RAM before the surrounding
+                        # database transaction fails. Discard it so the next
+                        # cycle reloads the last committed checkpoint instead of
+                        # learning the same labels twice.
+                        _clear_cached(models)
+                        logging.exception("learner cycle failed")
+                    if once:
+                        return
+                    stop.wait(CONFIG.learner_idle_seconds)
+        finally:
+            _clear_cached(models)
+            try:
+                session.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _task_lock(task.TASK_NAME)})
+                session.commit()
+            except Exception:
+                # Do not return a connection with an unknown lock state to the pool.
+                connection.invalidate()

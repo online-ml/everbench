@@ -29,6 +29,7 @@ Run the quality checks before committing:
 ```bash
 uv run prek install
 uv run prek run --all-files
+uv run pytest -q
 ```
 
 To see the dashboard move without waiting for real-world labels, run the local synthetic task instead:

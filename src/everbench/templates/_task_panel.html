@@ -1,6 +1,6 @@
 <div id="task-panel"
      hx-get="{{ url_for('task_panel', task_name=task_name) }}"
-     hx-trigger="every 5s"
+     hx-trigger="every 30s"
      hx-swap="outerHTML">
   <section>
     <h2>System</h2>
@@ -31,15 +31,7 @@
         {% for row in leaderboard %}
           <tr>
             <td data-sort-value="{{ row.model_id }}">
-              <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
-              <template>
-                <p class="model-tags"><span>owner: {{ row.owner }}</span> <span>uploaded: <time data-relative-time datetime="{{ row.created_at.isoformat() }}"></time></span></p>
-                {% if row.class_definition %}
-                  <pre><code>{{ row.class_definition }}</code></pre>
-                {% else %}
-                  <p class="muted">The class definition was not recorded for this legacy model.</p>
-                {% endif %}
-              </template>
+              <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
               {% if row.disabled_until %}
                 <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
                 <template>

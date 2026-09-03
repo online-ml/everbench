@@ -27,6 +27,7 @@
     let updatedAt = Date.now();
     const updated = document.querySelector('[data-updated]');
     const sortStates = new Map();
+    let modelDetailRequest;
 
     function updateAge() {
       const seconds = Math.max(0, (Date.now() - updatedAt) / 1000);
@@ -84,7 +85,7 @@
       restoreSorting();
     });
 
-    document.addEventListener('click', event => {
+    document.addEventListener('click', async event => {
       const sortControl = event.target.closest('[data-sort-type]');
       if (sortControl) {
         const table = sortControl.closest('[data-sortable]');
@@ -99,15 +100,35 @@
         return;
       }
 
-      const trigger = event.target.closest('[data-model-dialog]');
+      const trigger = event.target.closest('[data-model-dialog], [data-model-dialog-url]');
       if (!trigger) return;
-
-      const template = trigger.nextElementSibling;
-      if (!(template instanceof HTMLTemplateElement)) return;
 
       const dialog = document.querySelector('[data-persistent-model-dialog]');
       dialog.querySelector('[data-model-dialog-heading]').textContent = trigger.dataset.modelDialogHeading;
-      dialog.querySelector('[data-model-dialog-content]').replaceChildren(template.content.cloneNode(true));
+      const content = dialog.querySelector('[data-model-dialog-content]');
+      if (trigger.dataset.modelDialogUrl) {
+        modelDetailRequest?.abort();
+        modelDetailRequest = new AbortController();
+        const request = modelDetailRequest;
+        content.textContent = 'Loading…';
+        if (!dialog.open) dialog.showModal();
+        try {
+          const response = await fetch(trigger.dataset.modelDialogUrl, { signal: request.signal });
+          const markup = response.ok
+            ? await response.text()
+            : '<p class="muted">Model details are unavailable.</p>';
+          if (modelDetailRequest !== request) return;
+          content.innerHTML = markup;
+        } catch (error) {
+          if (error.name === 'AbortError' || modelDetailRequest !== request) return;
+          content.innerHTML = '<p class="muted">Model details are unavailable.</p>';
+        }
+      } else {
+        modelDetailRequest?.abort();
+        const template = trigger.nextElementSibling;
+        if (!(template instanceof HTMLTemplateElement)) return;
+        content.replaceChildren(template.content.cloneNode(true));
+      }
       updateRelativeTimes();
       if (!dialog.open) dialog.showModal();
     });
@@ -116,6 +137,6 @@
     setInterval(() => {
       updateAge();
       updateRelativeTimes();
-    }, 100);
+    }, 1000);
   </script>
 {% endblock %}

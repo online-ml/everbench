@@ -4,7 +4,7 @@ import os
 import time
 import unittest
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 from everbench import artifacts
 from everbench.api import task_source_url, validation_examples
 from everbench.batching import TimedBatch
-from everbench.models import PickledModel, prediction_for, validate_uploaded_model
+from everbench.model_process import IsolatedModel
+from everbench.models import PickledModel, prediction_for, validate_model
+from everbench.tasks import TaskDefinition
 from everbench.workers import _load_model
 
 
@@ -47,6 +49,23 @@ class ScoreOnlyModel:
         return float(event["score"])
 
 
+class BrokenProbabilityModel:
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+        del event_id, event
+        raise AttributeError("internal typo")
+
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
+        return 0.25
+
+
+class SlowModel:
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
+        time.sleep(2)
+        return 0.5
+
+
 class RuntimeHardeningTest(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "test-signing-key"
@@ -60,9 +79,12 @@ class RuntimeHardeningTest(unittest.TestCase):
             patch("everbench.workers.store.latest_snapshot", return_value=None),
             patch("everbench.workers.store.artifact", return_value=artifact),
         ):
-            model, snapshot = _load_model(cast(Session, None), cast(ModuleType, task), registration)
+            model, snapshot = _load_model(cast(Session, None), cast(TaskDefinition, task), registration)
         self.assertIsNone(snapshot)
-        self.assertEqual(model.predict_one("event", {}), 0.5)
+        try:
+            self.assertEqual(model.predict_one("event", {}), 0.5)
+        finally:
+            model.close()
 
     def test_task_source_url_links_to_the_checked_in_definition(self) -> None:
         task = SimpleNamespace(__file__=Path("tasks/dummy/task.py").resolve())
@@ -99,19 +121,18 @@ class RuntimeHardeningTest(unittest.TestCase):
 
     def test_upload_validation_accepts_a_task_without_labels(self) -> None:
         task = SimpleNamespace(PROBLEM_TYPE="binary_classification", METRICS=())
-        payload = artifacts.dumps(ConstantModel())
 
-        self.assertEqual(validate_uploaded_model(cast(ModuleType, task), payload, artifacts.sign(payload), []), 0)
+        self.assertEqual(validate_model(cast(TaskDefinition, task), PickledModel("constant", ConstantModel()), []), 0)
 
     def test_prediction_passes_event_id_to_standard_prediction_method(self) -> None:
-        task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="binary_classification"))
+        task = cast(TaskDefinition, SimpleNamespace(PROBLEM_TYPE="binary_classification"))
         model = PickledModel("event-aware", EventAwareModel())
 
         self.assertEqual(prediction_for(task, model, "event-1", {"x": 1.0}), 1.0)
         self.assertEqual(prediction_for(task, model, "event-2", {"x": 1.0}), 0.0)
 
     def test_multiclass_prediction_keeps_probability_mapping(self) -> None:
-        task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="multiclass_classification"))
+        task = cast(TaskDefinition, SimpleNamespace(PROBLEM_TYPE="multiclass_classification"))
         model = PickledModel("multiclass", MulticlassModel())
 
         self.assertEqual(prediction_for(task, model, "event-1", {"x": 1.0}), {"first": 0.2, "second": 0.8})
@@ -121,10 +142,23 @@ class RuntimeHardeningTest(unittest.TestCase):
             PickledModel("legacy", LegacyEventModel())
 
     def test_score_only_anomaly_model_is_accepted(self) -> None:
-        task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="anomaly_detection"))
+        task = cast(TaskDefinition, SimpleNamespace(PROBLEM_TYPE="anomaly_detection"))
         model = PickledModel("anomaly", ScoreOnlyModel())
 
         self.assertEqual(prediction_for(task, model, "event-1", {"score": 0.3}), 0.3)
+
+    def test_internal_attribute_error_does_not_trigger_prediction_fallback(self) -> None:
+        task = cast(TaskDefinition, SimpleNamespace(PROBLEM_TYPE="binary_classification"))
+        model = PickledModel("broken-probability", BrokenProbabilityModel())
+
+        with self.assertRaisesRegex(AttributeError, "internal typo"):
+            prediction_for(task, model, "event-1", {})
+
+    def test_isolated_model_enforces_operation_timeout(self) -> None:
+        payload = artifacts.dumps(SlowModel())
+        with IsolatedModel("slow", payload, artifacts.sign(payload), timeout_seconds=0.5) as model:
+            with self.assertRaisesRegex(TimeoutError, "operation limit"):
+                model.predict_one("event-1", {})
 
 
 if __name__ == "__main__":

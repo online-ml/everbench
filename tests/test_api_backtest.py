@@ -75,6 +75,32 @@ class BacktestApiTest(unittest.TestCase):
         self.assertIn("timing_seconds", body)
         model_registration.assert_not_called()
 
+    def test_missing_archive_remains_a_not_found_response(self) -> None:
+        payload = artifacts.dumps(ConstantModel())
+        signature = artifacts.sign(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = SimpleNamespace(
+                path=str(Path(directory) / "missing.parquet"),
+                content_sha256="missing",
+                row_count=1,
+                byte_size=1,
+            )
+            with (
+                patch("everbench.api._session", return_value=SimpleNamespace()),
+                patch("everbench.api.store.task_archive", return_value=manifest),
+                create_app().test_client() as client,
+            ):
+                response = client.post(
+                    "/api/tasks/dummy/backtest",
+                    data={"model": (io.BytesIO(payload), "model.pkl"), "archive_sha256": "missing"},
+                    headers={
+                        "X-API-Key": "test-api-key",
+                        "X-Everbench-Artifact-Signature": signature,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

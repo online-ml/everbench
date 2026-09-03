@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from alembic import command
 from everbench import artifacts, store
-from everbench.db import make_engine, make_session_factory
+from everbench.db import advisory_key, make_engine, make_session_factory
 from everbench.tasks import discover_tasks, load_task
 from everbench.workers import collect_events, collect_labels
 
@@ -69,11 +69,12 @@ def migrate() -> None:
     engine = make_engine()
     try:
         with engine.connect() as connection:
-            connection.execute(text("SELECT pg_advisory_lock(hashtext('everbench:migrations'))"))
+            lock_id = advisory_key("migrations")
+            connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": lock_id})
             try:
                 command.upgrade(AlembicConfig(str(root / "alembic.ini")), "head")
             finally:
-                connection.execute(text("SELECT pg_advisory_unlock(hashtext('everbench:migrations'))"))
+                connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
     finally:
         engine.dispose()
 

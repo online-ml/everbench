@@ -1,0 +1,6 @@
+<p class="model-tags"><span>owner: {{ model.owner }}</span> <span>uploaded: <time data-relative-time datetime="{{ model.created_at.isoformat() }}"></time></span></p>
+{% if model.class_definition %}
+  <pre><code>{{ model.class_definition }}</code></pre>
+{% else %}
+  <p class="muted">The class definition was not recorded for this legacy model.</p>
+{% endif %}
