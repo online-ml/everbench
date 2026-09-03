@@ -55,7 +55,7 @@
             <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
             <td class="number" data-sort-value="{{ row.error_rate if row.error_rate is not none else '' }}">{{ row.error_rate|percent }}</td>
             <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
-            {% for metric_name in metric_names %}<td class="number" data-sort-value="{{ row.metrics.get(metric_name, '') }}">{{ "%.4f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
+            {% for metric_name in metric_names %}<td class="number" data-sort-value="{{ row.metrics.get(metric_name, '') }}">{{ "%.3f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
           </tr>
         {% endfor %}
       </tbody>
