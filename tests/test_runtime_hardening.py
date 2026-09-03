@@ -67,9 +67,7 @@ class RuntimeHardeningTest(unittest.TestCase):
     def test_task_source_url_links_to_the_checked_in_definition(self) -> None:
         task = SimpleNamespace(__file__=Path("tasks/dummy/task.py").resolve())
 
-        self.assertEqual(
-            task_source_url(task), "https://github.com/online-ml/everbench/blob/main/tasks/dummy/task.py"
-        )
+        self.assertEqual(task_source_url(task), "https://github.com/online-ml/everbench/blob/main/tasks/dummy/task.py")
 
     def test_idle_batch_flushes_without_another_source_item(self) -> None:
         flushed: list[list[str]] = []

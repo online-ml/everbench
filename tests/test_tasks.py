@@ -51,7 +51,7 @@ class TaskDiscoveryTest(unittest.TestCase):
                 discover_tasks(root)
 
     def test_wiki_task_accepts_a_live_reverted_tag_event(self) -> None:
-        task = load_task("tasks/wiki_leftwing/task.py")
+        task = load_task("tasks/wiki_liftwing/task.py")
         event = {
             "database": "enwiki",
             "rev_id": 123,

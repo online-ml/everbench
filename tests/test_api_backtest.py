@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from everbench import artifacts
-from everbench.api import create_app, format_percent
+from everbench.api import create_app, format_duration, format_percent
 
 
 class ConstantModel:
@@ -32,6 +32,11 @@ class BacktestApiTest(unittest.TestCase):
         self.assertEqual(format_percent(0), "0.0%")
         self.assertEqual(format_percent(0.0005), "<0.1%")
         self.assertEqual(format_percent(0.1234), "12.3%")
+
+    def test_duration_format_is_compact(self) -> None:
+        self.assertEqual(format_duration(1.4), "1s")
+        self.assertEqual(format_duration(61), "1m")
+        self.assertEqual(format_duration(3_700), "1h")
 
     def test_backtest_uses_the_posted_model_without_a_registration(self) -> None:
         payload = artifacts.dumps(ConstantModel())

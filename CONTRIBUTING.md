@@ -13,7 +13,7 @@ Set `DATABASE_URL` in `.env`. The file is ignored by Git.
 Run the benchmark worker in one terminal:
 
 ```bash
-uv run everbench debug worker tasks/wiki_leftwing/task.py
+uv run everbench debug worker tasks/wiki_liftwing/task.py
 ```
 
 Run the web server in another terminal:

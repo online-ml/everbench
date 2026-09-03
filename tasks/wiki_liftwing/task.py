@@ -2,14 +2,14 @@
 
 Run it through the generic harness:
 
-    uv run everbench debug worker tasks/wiki_leftwing/task.py
+    uv run everbench debug worker tasks/wiki_liftwing/task.py
 """
 
 from __future__ import annotations
 
 from river import metrics
 
-TASK_NAME = "wiki-leftwing"
+TASK_NAME = "wiki-liftwing"
 DESCRIPTION_HTML = """
 <p>Predict whether an English Wikipedia article edit receives MediaWiki’s <code>mw-reverted</code> tag within 48 hours. Edits without that tag by the deadline receive a negative label.</p>
 """

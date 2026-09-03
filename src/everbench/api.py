@@ -33,6 +33,23 @@ def format_percent(value: float | None) -> str:
     return "<0.1%" if 0 < percentage < 0.1 else f"{percentage:.1f}%"
 
 
+def format_duration(seconds: float) -> str:
+    """Format a short, stable human duration for operational UI messages."""
+    seconds = max(0, round(seconds))
+    for unit, unit_seconds in (("d", 86_400), ("h", 3_600), ("m", 60)):
+        if seconds >= unit_seconds:
+            return f"{seconds // unit_seconds}{unit}"
+    return f"{seconds}s"
+
+
+def format_time_until(value: datetime) -> str:
+    return f"in {format_duration((value - datetime.now(UTC)).total_seconds())}"
+
+
+def format_time_since(value: datetime) -> str:
+    return f"{format_duration((datetime.now(UTC) - value).total_seconds())} ago"
+
+
 @lru_cache
 def sessions() -> sessionmaker[Session]:
     return make_session_factory()
@@ -159,6 +176,8 @@ def create_app() -> Flask:
     app.add_template_filter(format_number, "number")
     app.add_template_filter(format_file_size, "file_size")
     app.add_template_filter(format_percent, "percent")
+    app.add_template_filter(format_time_since, "time_since")
+    app.add_template_filter(format_time_until, "time_until")
 
     @app.get("/")
     def dashboard() -> str:
