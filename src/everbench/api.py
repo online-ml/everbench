@@ -25,6 +25,14 @@ from everbench.models import validate_uploaded_model
 from everbench.tasks import load_task_named
 
 
+def format_percent(value: float | None) -> str:
+    """Format a rate for compact display without concealing tiny nonzero values."""
+    if value is None:
+        return "—"
+    percentage = 100 * float(value)
+    return "<0.1%" if 0 < percentage < 0.1 else f"{percentage:.1f}%"
+
+
 @lru_cache
 def sessions() -> sessionmaker[Session]:
     return make_session_factory()
@@ -102,7 +110,7 @@ def displayed_class_definition(source: str, class_name: str) -> str:
     return source
 
 
-def validation_examples(session: Session, task_name: str) -> list[tuple[str, dict[str, float], Any]]:
+def validation_examples(session: Session, task_name: str) -> list[tuple[str, dict[str, Any], Any]]:
     """Prefer fresh Postgres labels; archives make a durable fallback."""
     examples = store.latest_labelled_examples(session, task_name, limit=5)
     if len(examples) < 5:
@@ -143,11 +151,9 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.teardown_appcontext(_close_session)
 
-    @app.template_filter("number")
     def format_number(value: int) -> str:
         return f"{int(value):,}"
 
-    @app.template_filter("file_size")
     def format_file_size(value: int | str | None) -> str:
         try:
             size = float(value if isinstance(value, int) else archive.archive_size(value or ""))
@@ -158,6 +164,10 @@ def create_app() -> Flask:
                 return f"{int(size):,} {unit}" if unit == "B" else f"{size:.1f} {unit}"
             size /= 1024
         raise AssertionError("unreachable")
+
+    app.add_template_filter(format_number, "number")
+    app.add_template_filter(format_file_size, "file_size")
+    app.add_template_filter(format_percent, "percent")
 
     @app.get("/")
     def dashboard() -> str:

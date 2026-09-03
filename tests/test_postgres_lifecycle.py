@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from river import metrics
@@ -21,14 +21,14 @@ from everbench.workers import learn_once
 
 
 class BrokenModel:
-    def predict_one(self, features: dict[str, float]) -> float:
-        del features
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         raise RuntimeError("intentional test failure")
 
 
 class WorkingModel:
-    def predict_one(self, features: dict[str, float]) -> float:
-        del features
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         return 0.5
 
 
@@ -120,12 +120,26 @@ class PostgresLifecycleTest(unittest.TestCase):
             assert broken is not None
             self.assertEqual(broken.failure_count, 1)
             self.assertTrue(broken.active)
+            self.assertIsNotNone(broken.disabled_until)
             self.assertIsNotNone(
                 session.get(Prediction, {"task_name": task_name, "event_id": "event", "model_id": "working"})
             )
             leaderboard = {row["model_id"]: row for row in store.task_leaderboard(session, task_name)}
             self.assertGreater(leaderboard["working"]["model_bytes"], 0)
             self.assertIsNotNone(leaderboard["working"]["created_at"])
+            self.assertEqual(leaderboard["broken"]["prediction_errors"], 1)
+            self.assertEqual(leaderboard["broken"]["label_errors"], 0)
+            self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
+
+        with self.sessions.begin() as session:
+            store.add_labels(session, task_name, [("event", 1, "test")], delay_seconds=None)
+            learn_once(session, cast(ModuleType, task))
+
+        with self.sessions() as session:
+            leaderboard = {row["model_id"]: row for row in store.task_leaderboard(session, task_name)}
+            self.assertEqual(leaderboard["broken"]["prediction_errors"], 1)
+            self.assertEqual(leaderboard["broken"]["label_errors"], 1)
+            self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
 
     def test_stream_cursor_is_updated_atomically(self) -> None:
         task_name = f"cursor-test-{uuid4()}"

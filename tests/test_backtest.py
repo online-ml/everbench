@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,12 +20,12 @@ class DelayedRate:
     def __init__(self) -> None:
         self.seen = 0
 
-    def predict_one(self, features: dict[str, float]) -> float:
-        del features
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         return float(self.seen)
 
-    def learn_one(self, features: dict[str, float], y: int) -> None:
-        del features, y
+    def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
+        del event_id, event, label
         self.seen += 1
 
 

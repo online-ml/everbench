@@ -14,7 +14,6 @@ REQUIRED_TASK_MEMBERS = (
     "LABEL_STREAM_URL",
     "accepts_event",
     "event_id",
-    "features_for",
     "label_for",
     "PROBLEM_TYPE",
     "METRICS",

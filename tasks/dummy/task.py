@@ -49,10 +49,6 @@ def accepts_event(event: dict) -> bool:
     return event_id(event) is not None
 
 
-def features_for(event: dict) -> dict[str, float]:
-    return {"value": float(event["value"]), "is_even": float(event["value"] % 2 == 0)}
-
-
 def metric_inputs_for(metric: object, y_true: int, prediction: float) -> tuple[bool, bool | float]:
     """Accuracy and F1 use a hard decision; ranking/loss metrics use probability."""
     target = bool(y_true)

@@ -1,15 +1,16 @@
-"""A bounded, thread-safe cache for event features shared by one runtime."""
+"""A bounded, thread-safe cache for raw events shared by one runtime."""
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import RLock
+from typing import Any
 
 
 @dataclass(frozen=True)
 class HotEvent:
-    features: dict[str, float]
+    event: dict[str, Any]
 
 
 class HotStore:
@@ -27,19 +28,15 @@ class HotStore:
         self._misses = 0
         self._lock = RLock()
 
-    def put_event(self, event_id: str, features: dict[str, float]) -> None:
+    def put_event(self, event_id: str, event: dict[str, Any]) -> None:
         with self._lock:
-            self._events[event_id] = HotEvent(features)
+            self._events[event_id] = HotEvent(event)
             self._events.move_to_end(event_id)
             self._trim()
 
-    def put_features(self, event_id: str, features: dict[str, float]) -> None:
+    def put_payload(self, event_id: str, payload: dict[str, Any]) -> None:
         with self._lock:
-            event = self._events.get(event_id)
-            if event is None:
-                self._events[event_id] = HotEvent(features)
-            else:
-                self._events[event_id] = HotEvent(features)
+            self._events[event_id] = HotEvent(payload)
             self._events.move_to_end(event_id)
             self._trim()
 
@@ -68,7 +65,7 @@ class HotStore:
             event_id, _ = self._events.popitem(last=False)
             self._labelled.pop(event_id, None)
 
-    def features(self, event_id: str) -> dict[str, float] | None:
+    def event(self, event_id: str) -> dict[str, Any] | None:
         with self._lock:
             event = self._events.get(event_id)
             if event is None:
@@ -76,7 +73,7 @@ class HotStore:
                 return None
             self._hits += 1
             self._events.move_to_end(event_id)
-            return event.features
+            return event.event
 
     def stats(self) -> dict[str, int]:
         with self._lock:

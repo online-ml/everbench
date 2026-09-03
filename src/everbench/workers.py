@@ -132,7 +132,7 @@ def collect_events(
     delay_seconds = getattr(task, "NEGATIVE_LABEL_DELAY_SECONDS", None)
     cursor_state = _cursor_state(sessions, task, "event_stream", "events")
 
-    def flush(items: list[tuple[tuple[str, float, dict[str, float]] | None, str | None]]) -> None:
+    def flush(items: list[tuple[tuple[str, float, dict[str, Any]] | None, str | None]]) -> None:
         events = [event for event, _ in items if event is not None]
         cursor = _last_cursor(items)
         with sessions.begin() as session:
@@ -157,10 +157,10 @@ def collect_events(
                     continue
                 event_id = task.event_id(event)
                 if event_id is not None:
-                    event_time, features = _timestamp(task, event), task.features_for(event)
+                    event_time = _timestamp(task, event)
                     if hot is not None:
-                        hot.put_event(event_id, features)
-                    batch.add(((event_id, event_time, features), message.event_id))
+                        hot.put_event(event_id, event)
+                    batch.add(((event_id, event_time, event), message.event_id))
                 else:
                     batch.add((None, message.event_id))
         finally:
@@ -277,37 +277,37 @@ def _restore_uncheckpointed_learning(
     # their already-included history twice.
     if snapshot is not None and snapshot.checkpoint_label_available_at is None:
         return
-    for _, features, y in store.trained_examples_since_checkpoint(
+    for event_id, event, y in store.trained_examples_since_checkpoint(
         session,
         task.TASK_NAME,
         registration.model_id,
         snapshot.checkpoint_label_available_at if snapshot is not None else None,
         snapshot.checkpoint_event_sequence if snapshot is not None else None,
     ):
-        _model_operation(model.model_id, "learn", lambda features=features, y=y: model.learn_one(features, y))
+        _model_operation(
+            model.model_id, "learn", lambda event_id=event_id, event=event, y=y: model.learn_one(event_id, event, y)
+        )
 
 
-def _features(
-    session: Session, task_name: str, event_ids: list[str], hot: HotStore | None
-) -> dict[str, dict[str, float]]:
-    """Read event features from memory, then bulk-fall back to Postgres."""
-    values = {event_id: hot.features(event_id) for event_id in event_ids} if hot is not None else {}
+def _events(session: Session, task_name: str, event_ids: list[str], hot: HotStore | None) -> dict[str, dict[str, Any]]:
+    """Read raw events from memory, then bulk-fall back to Postgres."""
+    values = {event_id: hot.event(event_id) for event_id in event_ids} if hot is not None else {}
     missing = [event_id for event_id in event_ids if values.get(event_id) is None]
     if missing:
-        recovered = store.event_features(session, task_name, missing)
+        recovered = store.event_payloads(session, task_name, missing)
         if hot is not None:
-            for event_id, features in recovered.items():
-                hot.put_features(event_id, features)
+            for event_id, event in recovered.items():
+                hot.put_payload(event_id, event)
         values.update(recovered)
     absent = {event_id for event_id in event_ids if values.get(event_id) is None}
     if absent:
-        raise RuntimeError(f"event features disappeared before processing: {', '.join(sorted(absent)[:3])}")
-    return {event_id: features for event_id, features in values.items() if features is not None}
+        raise RuntimeError(f"raw events disappeared before processing: {', '.join(sorted(absent)[:3])}")
+    return {event_id: event for event_id, event in values.items() if event is not None}
 
 
 def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedModel]) -> list[tuple[Any, CachedModel]]:
     """Keep models resident while noticing API additions and deactivations."""
-    registrations = store.active_registrations(session, task.TASK_NAME)
+    registrations = store.runnable_registrations(session, task.TASK_NAME)
     active_ids = {registration.model_id for registration in registrations}
     for model_id in set(cache) - active_ids:
         del cache[model_id]
@@ -340,10 +340,15 @@ def _active_models(session: Session, task: ModuleType, cache: dict[str, CachedMo
                 cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
         except Exception as error:
             cache.pop(registration.model_id, None)
-            active = store.record_model_failure(
-                session, task.TASK_NAME, registration.model_id, error, CONFIG.max_model_failures
+            retry_at = store.record_model_failure(
+                session,
+                task.TASK_NAME,
+                registration.model_id,
+                error,
+                CONFIG.model_retry_initial_seconds,
+                CONFIG.model_retry_max_seconds,
             )
-            logging.exception("could not load model %s; active=%s", registration.model_id, active)
+            logging.exception("could not load model %s; retry_at=%s", registration.model_id, retry_at)
             continue
         models.append((registration, cache[registration.model_id]))
     return models
@@ -370,25 +375,25 @@ def _learn_model(
     if hot is not None:
         hot.mark_labelled([event_id for event_id, _, _, _ in labels])
     if supports_learning(model):
-        label_features = _features(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
+        label_events = _events(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
         for event_id, y, _, _ in labels:
             _model_operation(
                 model.model_id,
                 "learn",
-                lambda event_id=event_id, y=y: model.learn_one(label_features[event_id], y),
+                lambda event_id=event_id, y=y: model.learn_one(event_id, label_events[event_id], y),
             )
     store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
     events = store.unpredicted_events(
         session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
     )
-    prediction_features = _features(session, task.TASK_NAME, events, hot)
+    prediction_events = _events(session, task.TASK_NAME, events, hot)
     predictions = [
         (
             event_id,
             _model_operation(
                 model.model_id,
                 "predict",
-                lambda event_id=event_id: prediction_for(task, model, prediction_features[event_id], event_id),
+                lambda event_id=event_id: prediction_for(task, model, event_id, prediction_events[event_id]),
             ),
         )
         for event_id in events
@@ -427,20 +432,31 @@ def learn_once(
 ) -> list[tuple[str, int, int, int]]:
     cache = cache if cache is not None else {}
     results = []
+    for registration in store.disabled_registrations(session, task.TASK_NAME):
+        cache.pop(registration.model_id, None)
+        store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     for registration, cached in _active_models(session, task, cache):
         try:
             with session.begin_nested():
                 trained, predicted, evaluated = _learn_model(session, task, registration, cached, hot)
         except Exception as error:
             cache.pop(registration.model_id, None)
-            active = store.record_model_failure(
-                session, task.TASK_NAME, registration.model_id, error, CONFIG.max_model_failures
+            retry_at = store.record_model_failure(
+                session,
+                task.TASK_NAME,
+                registration.model_id,
+                error,
+                CONFIG.model_retry_initial_seconds,
+                CONFIG.model_retry_max_seconds,
             )
-            logging.exception("model %s failed; active=%s", registration.model_id, active)
+            logging.exception("model %s failed; retry_at=%s", registration.model_id, retry_at)
             continue
         if trained or predicted or evaluated:
             store.record_model_success(session, task.TASK_NAME, registration.model_id)
         results.append((registration.model_id, trained, predicted, evaluated))
+    for registration in store.disabled_registrations(session, task.TASK_NAME):
+        cache.pop(registration.model_id, None)
+        store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     if hot is not None:
         hot.discard(store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids()))
     return results

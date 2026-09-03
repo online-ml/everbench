@@ -6,18 +6,19 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from everbench import artifacts
-from everbench.api import create_app
+from everbench.api import create_app, format_percent
 
 
 class ConstantModel:
-    def predict_one(self, features: dict[str, float]) -> float:
-        del features
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         return 0.5
 
 
@@ -25,6 +26,12 @@ class BacktestApiTest(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["EVERBENCH_API_KEY"] = "test-api-key"
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "test-signing-key"
+
+    def test_percent_filter_preserves_small_non_zero_rates(self) -> None:
+        self.assertEqual(format_percent(None), "—")
+        self.assertEqual(format_percent(0), "0.0%")
+        self.assertEqual(format_percent(0.0005), "<0.1%")
+        self.assertEqual(format_percent(0.1234), "12.3%")
 
     def test_backtest_uses_the_posted_model_without_a_registration(self) -> None:
         payload = artifacts.dumps(ConstantModel())

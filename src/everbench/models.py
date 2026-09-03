@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
-from inspect import Parameter, signature
 from types import ModuleType
 from typing import Any
 
@@ -12,20 +10,22 @@ from everbench import artifacts
 from everbench.metrics import MetricTracker
 
 
-def prediction_for(task: ModuleType, model: Any, features: dict[str, float], event_id: str | None = None) -> Any:
+def prediction_for(task: ModuleType, model: Any, event_id: str, event: dict[str, Any]) -> Any:
     """Apply a task's prediction semantics to a model."""
-    if task.PROBLEM_TYPE == "binary_classification":
+    if task.PROBLEM_TYPE in {"binary_classification", "multiclass_classification"}:
         try:
-            probabilities = model.predict_proba_one(features, event_id=event_id)
+            probabilities = model.predict_proba_one(event_id, event)
         except AttributeError:
-            return model.predict_one(features, event_id=event_id)
+            return model.predict_one(event_id, event)
+        if task.PROBLEM_TYPE == "multiclass_classification":
+            return probabilities
         return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
     if task.PROBLEM_TYPE == "anomaly_detection":
         try:
-            return model.score_one(features, event_id=event_id)
+            return model.score_one(event_id, event)
         except AttributeError:
-            return model.predict_one(features, event_id=event_id)
-    return model.predict_one(features, event_id=event_id)
+            return model.predict_one(event_id, event)
+    return model.predict_one(event_id, event)
 
 
 def metric_inputs_for(task: ModuleType, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
@@ -41,57 +41,37 @@ class PickledModel:
         self._predict_one = getattr(model, "predict_one", None)
         self._predict_proba_one = getattr(model, "predict_proba_one", None)
         self._score_one = getattr(model, "score_one", None)
-        if not (callable(self._predict_one) or callable(self._predict_proba_one)):
-            raise TypeError("pickled models must provide predict_one(features) or predict_proba_one(features)")
+        if not (callable(self._predict_one) or callable(self._predict_proba_one) or callable(self._score_one)):
+            raise TypeError(
+                "pickled models must provide predict_one(event_id, event), predict_proba_one(event_id, event), or score_one(event_id, event)"
+            )
         self.model_id = model_id
         self.model = model
-        self._predict_one_accepts_event_id = self._accepts_event_id(self._predict_one)
-        self._predict_proba_one_accepts_event_id = self._accepts_event_id(self._predict_proba_one)
-        self._score_one_accepts_event_id = self._accepts_event_id(self._score_one)
 
     @property
     def supports_learning(self) -> bool:
         return callable(getattr(self.model, "learn_one", None))
 
-    @staticmethod
-    def _accepts_event_id(predictor: Callable[..., Any] | None) -> bool:
-        if predictor is None:
-            return False
-        try:
-            parameters = signature(predictor).parameters.values()
-        except (TypeError, ValueError):
-            parameters = ()
-        return any(parameter.name == "event_id" or parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters)
-
-    @staticmethod
-    def _call_predictor(
-        predictor: Callable[..., Any], accepts_event_id: bool, features: dict[str, float], event_id: str | None
-    ) -> Any:
-        """Preserve River's one-argument protocol while allowing event-aware models."""
-        return predictor(features, event_id=event_id) if accepts_event_id else predictor(features)
-
-    def predict_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._predict_one):
             raise AttributeError("underlying model does not provide predict_one")
-        return self._call_predictor(self._predict_one, self._predict_one_accepts_event_id, features, event_id)
+        return self._predict_one(event_id, event)
 
-    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._predict_proba_one):
             raise AttributeError("underlying model does not provide predict_proba_one")
-        return self._call_predictor(
-            self._predict_proba_one, self._predict_proba_one_accepts_event_id, features, event_id
-        )
+        return self._predict_proba_one(event_id, event)
 
-    def score_one(self, features: dict[str, float], *, event_id: str | None = None) -> Any:
+    def score_one(self, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._score_one):
             raise AttributeError("underlying model does not provide score_one")
-        return self._call_predictor(self._score_one, self._score_one_accepts_event_id, features, event_id)
+        return self._score_one(event_id, event)
 
-    def learn_one(self, features: dict[str, float], y: Any) -> None:
+    def learn_one(self, event_id: str, event: dict[str, Any], label: Any) -> None:
         learner = getattr(self.model, "learn_one", None)
         if learner is None:
             raise AttributeError("underlying model does not provide learn_one")
-        learner(features, y)
+        learner(event_id, event, label)
 
     def payload(self) -> bytes:
         return artifacts.dumps(self.model)
@@ -107,7 +87,7 @@ def validate_uploaded_model(
     task: ModuleType,
     payload: bytes,
     signature: str,
-    examples: list[tuple[str, dict[str, float], object]],
+    examples: list[tuple[str, dict[str, Any], object]],
 ) -> int:
     """Check a signed upload against available labelled examples without mutating it.
 
@@ -118,10 +98,10 @@ def validate_uploaded_model(
     if not examples:
         return 0
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
-    for event_id, features, y in examples[-5:]:
-        prediction = prediction_for(task, candidate, features, event_id)
+    for event_id, event, y in examples[-5:]:
+        prediction = prediction_for(task, candidate, event_id, event)
         tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
         if supports_learning(candidate):
-            candidate.learn_one(features, y)
+            candidate.learn_one(event_id, event, y)
     tracker.values()
     return min(len(examples), 5)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
 
 import cloudpickle
@@ -26,10 +27,8 @@ class LiftWingRevertRisk:
         self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
 
-    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> dict[bool, float]:
-        del features
-        if event_id is None:
-            raise ValueError("Lift Wing requires an event ID")
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+        del event
         wiki, separator, revision_id = event_id.partition(":")
         if not separator or not wiki.endswith("wiki") or not revision_id.isdigit():
             raise ValueError("Lift Wing requires an event ID in the form '<language>wiki:<revision_id>'")

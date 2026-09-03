@@ -19,7 +19,6 @@ METRICS = [metrics.ROCAUC()]
 DESCRIPTION_HTML = "test"
 def accepts_event(payload): return True
 def event_id(payload): return payload["id"]
-def features_for(payload): return payload
 def label_for(payload): return None
 """
 

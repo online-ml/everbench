@@ -32,7 +32,7 @@ from everbench.schema import (
 def add_events(
     session: Session,
     task_name: str,
-    events: list[tuple[str, float, dict[str, float]]],
+    events: list[tuple[str, float, dict[str, Any]]],
     delay_seconds: float | None = None,
 ) -> int:
     """Insert a collector batch in one statement and one transaction."""
@@ -43,9 +43,9 @@ def add_events(
             "task_name": task_name,
             "event_id": event_id,
             "event_time": datetime.fromtimestamp(timestamp, UTC),
-            "features": features,
+            "event": event,
         }
-        for event_id, timestamp, features in events
+        for event_id, timestamp, event in events
     ]
     statement = (
         insert(BenchmarkEvent)
@@ -148,6 +148,37 @@ def active_registrations(session: Session, task_name: str) -> list[ModelRegistra
     )
 
 
+def runnable_registrations(session: Session, task_name: str) -> list[ModelRegistration]:
+    """Return manually active models whose retry window has elapsed."""
+    return list(
+        session.scalars(
+            select(ModelRegistration)
+            .where(
+                ModelRegistration.task_name == task_name,
+                ModelRegistration.active,
+                (ModelRegistration.disabled_until.is_(None)) | (ModelRegistration.disabled_until <= func.now()),
+            )
+            .order_by(ModelRegistration.model_id)
+        )
+    )
+
+
+def disabled_registrations(session: Session, task_name: str) -> list[ModelRegistration]:
+    """Return active models currently paused by the circuit breaker."""
+    return list(
+        session.scalars(
+            select(ModelRegistration)
+            .where(
+                ModelRegistration.task_name == task_name,
+                ModelRegistration.active,
+                ModelRegistration.disabled_until.is_not(None),
+                ModelRegistration.disabled_until > func.now(),
+            )
+            .order_by(ModelRegistration.model_id)
+        )
+    )
+
+
 def stream_cursor(session: Session, task_name: str, stream_name: str) -> str | None:
     row = session.get(StreamCursor, {"task_name": task_name, "stream_name": stream_name})
     return row.event_id if row else None
@@ -210,13 +241,19 @@ def unevaluated_labels(session: Session, task_name: str, model_id: str, limit: i
     return [(event_id, y, prediction) for event_id, y, prediction in rows]
 
 
-def add_trainings(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> None:
+def add_trainings(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> list[str]:
     if event_ids:
-        session.execute(
-            insert(Training)
-            .values([{"task_name": task_name, "event_id": event_id, "model_id": model_id} for event_id in event_ids])
-            .on_conflict_do_nothing()
+        return list(
+            session.scalars(
+                insert(Training)
+                .values(
+                    [{"task_name": task_name, "event_id": event_id, "model_id": model_id} for event_id in event_ids]
+                )
+                .on_conflict_do_nothing()
+                .returning(Training.event_id)
+            )
         )
+    return []
 
 
 def add_metric_updates(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> None:
@@ -315,26 +352,24 @@ def unpredicted_events(
     return [event_id for (event_id,) in rows]
 
 
-def event_features(session: Session, task_name: str, event_ids: list[str]) -> dict[str, dict[str, float]]:
-    """Bulk database fallback for read-cache misses."""
+def event_payloads(session: Session, task_name: str, event_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Bulk database fallback for raw event cache misses."""
     if not event_ids:
         return {}
     rows = session.execute(
-        select(BenchmarkEvent.event_id, BenchmarkEvent.features).where(
+        select(BenchmarkEvent.event_id, BenchmarkEvent.event).where(
             BenchmarkEvent.task_name == task_name,
             BenchmarkEvent.event_id.in_(event_ids),
         )
     )
-    return {event_id: features for event_id, features in rows}
+    return {event_id: event for event_id, event in rows}
 
 
-def latest_labelled_examples(
-    session: Session, task_name: str, limit: int = 5
-) -> list[tuple[str, dict[str, float], Any]]:
+def latest_labelled_examples(session: Session, task_name: str, limit: int = 5) -> list[tuple[str, dict[str, Any], Any]]:
     """Read recent labelled events before archives are available for a task."""
     rows = session.execute(
         text(
-            """SELECT event.event_id, event.features, label.y
+            """SELECT event.event_id, event.event, label.y
                FROM benchmark_labels AS label
                JOIN benchmark_events AS event USING (task_name, event_id)
                WHERE label.task_name = :task_name
@@ -342,7 +377,7 @@ def latest_labelled_examples(
         ),
         {"task_name": task_name, "limit": limit},
     )
-    return list(reversed([(event_id, features, y) for event_id, features, y in rows]))
+    return list(reversed([(event_id, event, y) for event_id, event, y in rows]))
 
 
 def labelled_unpredicted_events(
@@ -375,18 +410,22 @@ def add_prediction_skips(
     model_id: str,
     event_ids: list[str],
     reason: str = "label-available-before-prediction",
-) -> None:
+) -> list[str]:
     if event_ids:
-        session.execute(
-            insert(PredictionSkip)
-            .values(
-                [
-                    {"task_name": task_name, "event_id": event_id, "model_id": model_id, "reason": reason}
-                    for event_id in event_ids
-                ]
+        return list(
+            session.scalars(
+                insert(PredictionSkip)
+                .values(
+                    [
+                        {"task_name": task_name, "event_id": event_id, "model_id": model_id, "reason": reason}
+                        for event_id in event_ids
+                    ]
+                )
+                .on_conflict_do_nothing()
+                .returning(PredictionSkip.event_id)
             )
-            .on_conflict_do_nothing()
         )
+    return []
 
 
 def add_predictions(session: Session, task_name: str, model_id: str, predictions: list[tuple[str, Any]]) -> list[str]:
@@ -481,6 +520,7 @@ def register_model(
         registration.failure_count = 0
         registration.last_error = None
         registration.failed_at = None
+        registration.disabled_until = None
         return registration, False
     start_sequence = session.scalar(
         select(func.coalesce(func.max(BenchmarkEvent.sequence) + 1, 1)).where(BenchmarkEvent.task_name == task_name)
@@ -505,22 +545,27 @@ def deactivate_model(session: Session, task_name: str, model_id: str) -> bool:
 
 
 def record_model_failure(
-    session: Session, task_name: str, model_id: str, error: BaseException, max_failures: int
-) -> bool:
-    """Record one failed model cycle and deactivate repeated offenders.
-
-    Returns whether the model remains active. The traceback stays in logs; the
-    database retains a concise operational message for the dashboard/API.
-    """
+    session: Session,
+    task_name: str,
+    model_id: str,
+    error: BaseException,
+    retry_initial_seconds: float,
+    retry_max_seconds: float,
+) -> datetime | None:
+    """Pause a failed model with capped exponential backoff and return its retry time."""
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration is None:
-        return False
+        return None
     registration.failure_count += 1
     registration.last_error = f"{type(error).__name__}: {error}"[:2_000]
-    registration.failed_at = datetime.now(UTC)
-    if registration.failure_count >= max_failures:
-        registration.active = False
-    return registration.active
+    now = datetime.now(UTC)
+    registration.failed_at = now
+    retry_seconds = min(
+        max(retry_initial_seconds, 0.0) * 2 ** min(registration.failure_count - 1, 20),
+        max(retry_max_seconds, 0.0),
+    )
+    registration.disabled_until = now + timedelta(seconds=retry_seconds)
+    return registration.disabled_until
 
 
 def record_model_success(session: Session, task_name: str, model_id: str) -> None:
@@ -529,6 +574,25 @@ def record_model_success(session: Session, task_name: str, model_id: str) -> Non
         registration.failure_count = 0
         registration.last_error = None
         registration.failed_at = None
+        registration.disabled_until = None
+
+
+def record_disabled_work(
+    session: Session, task_name: str, registration: ModelRegistration, limit: int
+) -> tuple[int, int]:
+    """Terminally skip bounded work for a paused model and count it durably."""
+    labelled = labelled_unpredicted_events(
+        session, task_name, registration.model_id, registration.start_sequence, limit
+    )
+    events = labelled + unpredicted_events(
+        session, task_name, registration.model_id, registration.start_sequence, max(limit - len(labelled), 0)
+    )
+    prediction_errors = len(add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled"))
+    labels = untrained_labels(session, task_name, registration.model_id, limit)
+    label_errors = len(add_trainings(session, task_name, registration.model_id, [event_id for event_id, *_ in labels]))
+    registration.prediction_errors += prediction_errors
+    registration.label_errors += label_errors
+    return prediction_errors, label_errors
 
 
 def model_registration(session: Session, task_name: str, model_id: str) -> ModelRegistration | None:
@@ -581,7 +645,7 @@ def trained_examples_since_checkpoint(
     model_id: str,
     checkpoint_label_available_at: datetime | None,
     checkpoint_event_sequence: int | None,
-) -> list[tuple[str, dict[str, float], Any]]:
+) -> list[tuple[str, dict[str, Any], Any]]:
     """Return committed learning updates not represented by a checkpoint."""
     parameters: dict[str, Any] = {"task_name": task_name, "model_id": model_id}
     watermark = ""
@@ -595,7 +659,7 @@ def trained_examples_since_checkpoint(
         )
     rows = session.execute(
         text(
-            f"""SELECT event.event_id, event.features, label.y
+            f"""SELECT event.event_id, event.event, label.y
                  FROM benchmark_trainings AS training
                  JOIN benchmark_events AS event USING (task_name, event_id)
                  JOIN benchmark_labels AS label USING (task_name, event_id)
@@ -605,7 +669,7 @@ def trained_examples_since_checkpoint(
         ),
         parameters,
     )
-    return [(event_id, features, y) for event_id, features, y in rows]
+    return [(event_id, event, y) for event_id, event, y in rows]
 
 
 def save_pickle_snapshot(
@@ -740,13 +804,23 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       model.failure_count,
                       model.last_error,
                       model.failed_at,
+                      model.disabled_until,
+                      model.prediction_errors,
+                      model.label_errors,
                       model.created_at,
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
                       COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes,
                       COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
-                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
+                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name,
+                      CASE
+                        WHEN COALESCE(metric_state.predictions, 0) + COALESCE(metric_state.observations, 0)
+                             + model.prediction_errors + model.label_errors > 0
+                        THEN (model.prediction_errors + model.label_errors)::float
+                             / (COALESCE(metric_state.predictions, 0) + COALESCE(metric_state.observations, 0)
+                                + model.prediction_errors + model.label_errors)
+                      END AS error_rate
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id
@@ -815,7 +889,7 @@ def archive_rows(
 ) -> list[dict[str, Any]]:
     rows = session.execute(
         text(
-            f"""SELECT event.event_id, event.sequence, event.event_time, event.inserted_at, event.features,
+            f"""SELECT event.event_id, event.sequence, event.event_time, event.inserted_at, event.event,
                       label.y, label.reason, label.available_at
                FROM benchmark_events AS event
                JOIN benchmark_labels AS label USING (task_name, event_id)

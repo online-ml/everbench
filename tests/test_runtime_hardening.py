@@ -4,7 +4,7 @@ import os
 import time
 import unittest
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 from sqlalchemy.orm import Session
@@ -17,21 +17,33 @@ from everbench.workers import _load_model
 
 
 class ConstantModel:
-    def predict_one(self, features: dict[str, float]) -> float:
-        del features
+    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         return 0.5
 
 
 class EventAwareModel:
-    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> dict[bool, float]:
-        del features
-        return {False: event_id != "event-1", True: event_id == "event-1"}
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+        del event
+        return {False: float(event_id != "event-1"), True: float(event_id == "event-1")}
 
 
 class LegacyEventModel:
-    def predict_event(self, event_id: str, features: dict[str, float]) -> float:
-        del event_id, features
+    def predict_event(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id, event
         return 0.5
+
+
+class MulticlassModel:
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[str, float]:
+        del event_id, event
+        return {"first": 0.2, "second": 0.8}
+
+
+class ScoreOnlyModel:
+    def score_one(self, event_id: str, event: dict[str, Any]) -> float:
+        del event_id
+        return float(event["score"])
 
 
 class RuntimeHardeningTest(unittest.TestCase):
@@ -49,7 +61,7 @@ class RuntimeHardeningTest(unittest.TestCase):
         ):
             model, snapshot = _load_model(cast(Session, None), cast(ModuleType, task), registration)
         self.assertIsNone(snapshot)
-        self.assertEqual(model.predict_one({}), 0.5)
+        self.assertEqual(model.predict_one("event", {}), 0.5)
 
     def test_idle_batch_flushes_without_another_source_item(self) -> None:
         flushed: list[list[str]] = []
@@ -89,12 +101,24 @@ class RuntimeHardeningTest(unittest.TestCase):
         task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="binary_classification"))
         model = PickledModel("event-aware", EventAwareModel())
 
-        self.assertEqual(prediction_for(task, model, {"x": 1.0}, "event-1"), 1.0)
-        self.assertEqual(prediction_for(task, model, {"x": 1.0}, "event-2"), 0.0)
+        self.assertEqual(prediction_for(task, model, "event-1", {"x": 1.0}), 1.0)
+        self.assertEqual(prediction_for(task, model, "event-2", {"x": 1.0}), 0.0)
+
+    def test_multiclass_prediction_keeps_probability_mapping(self) -> None:
+        task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="multiclass_classification"))
+        model = PickledModel("multiclass", MulticlassModel())
+
+        self.assertEqual(prediction_for(task, model, "event-1", {"x": 1.0}), {"first": 0.2, "second": 0.8})
 
     def test_legacy_predict_event_protocol_is_rejected(self) -> None:
         with self.assertRaisesRegex(TypeError, "predict_one"):
             PickledModel("legacy", LegacyEventModel())
+
+    def test_score_only_anomaly_model_is_accepted(self) -> None:
+        task = cast(ModuleType, SimpleNamespace(PROBLEM_TYPE="anomaly_detection"))
+        model = PickledModel("anomaly", ScoreOnlyModel())
+
+        self.assertEqual(prediction_for(task, model, "event-1", {"score": 0.3}), 0.3)
 
 
 if __name__ == "__main__":

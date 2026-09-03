@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 from math import log1p
+from typing import Any
 
 from river import linear_model, optim, preprocessing
 
 
 class WikiFeatureLogisticRegression:
-    """Learn from the task's frozen edit metadata with stable derived features."""
+    """Learn from raw edit metadata with stable derived features."""
 
     def __init__(self) -> None:
         self.model = preprocessing.StandardScaler() | linear_model.LogisticRegression(optimizer=optim.SGD(0.03))
 
     @staticmethod
-    def transform(features: dict[str, float]) -> dict[str, float]:
-        anonymous = float(features.get("anonymous", 0.0))
-        comment_length = max(float(features.get("comment_length", 0.0)), 0.0)
-        title_length = max(float(features.get("title_length", 0.0)), 0.0)
-        byte_change = float(features.get("byte_change", 0.0))
+    def transform(event: dict[str, Any]) -> dict[str, float]:
+        change = event.get("length") or {}
+        anonymous = float(bool(event.get("user_is_anon")))
+        comment_length = float(len(event.get("comment") or ""))
+        title_length = float(len(event.get("title") or ""))
+        byte_change = float(change.get("new", 0)) - float(change.get("old", 0))
         magnitude = abs(byte_change)
         return {
             "anonymous": anonymous,
@@ -31,9 +33,10 @@ class WikiFeatureLogisticRegression:
             "anonymous_short_comment": anonymous * float(comment_length < 10),
         }
 
-    def predict_proba_one(self, features: dict[str, float], *, event_id: str | None = None) -> dict[bool, float]:
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
         del event_id
-        return self.model.predict_proba_one(self.transform(features))
+        return self.model.predict_proba_one(self.transform(event))
 
-    def learn_one(self, features: dict[str, float], label: int) -> None:
-        self.model.learn_one(self.transform(features), bool(label))
+    def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
+        del event_id
+        self.model.learn_one(self.transform(event), bool(label))

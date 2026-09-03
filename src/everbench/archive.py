@@ -94,9 +94,9 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
     # Read archives made before the compact schema too.
-    feature_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
+    event_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
     has_sequence = "event_sequence" in parquet.schema.names
-    columns = ["event_id", feature_column, "label", "event_available_at", "label_available_at"]
+    columns = ["event_id", event_column, "label", "event_available_at", "label_available_at"]
     if has_sequence:
         columns.append("event_sequence")
 
@@ -104,7 +104,7 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
     fallback_sequence = 0
     for batch in parquet.iter_batches(columns=columns):
         for row in batch.to_pylist():
-            features = json.loads(row[feature_column])
+            event = json.loads(row[event_column])
             sequence = int(row["event_sequence"]) if has_sequence else fallback_sequence
             fallback_sequence += 1
             event_id = row["event_id"]
@@ -113,7 +113,7 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
             if label_at < event_at:
                 raise ValueError(f"archive label for {event_id!r} became available before its event")
             # Event actions sort before labels at exactly the same time.
-            timeline.append((event_at, 0, sequence, event_id, "event", features))
+            timeline.append((event_at, 0, sequence, event_id, "event", event))
             timeline.append((label_at, 1, sequence, event_id, "label", row["label"]))
 
     predictions: dict[str, tuple[dict[str, float], Any]] = {}
@@ -121,18 +121,18 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
     learn_seconds = 0.0
     for _, _, _, event_id, action, value in sorted(timeline):
         if action == "event":
-            features = value
+            event = value
             started_at = perf_counter()
-            predictions[event_id] = (features, prediction_for(task, model, features, event_id))
+            predictions[event_id] = (event, prediction_for(task, model, event_id, event))
             predict_seconds += perf_counter() - started_at
             tracker.predictions += 1
             continue
-        features, prediction = predictions.pop(event_id)
+        event, prediction = predictions.pop(event_id)
         target = value
         tracker.update(target, prediction, lambda metric, y, prediction: metric_inputs_for(task, metric, y, prediction))
         if supports_learning(model):
             started_at = perf_counter()
-            model.learn_one(features, target)
+            model.learn_one(event_id, event, target)
             learn_seconds += perf_counter() - started_at
     return {
         "predictions": tracker.predictions,
@@ -147,14 +147,14 @@ def replay_archive(task: ModuleType, uploaded_model: Any, path: Path | bytes) ->
 
 
 def _record(row: dict) -> dict:
-    """Use JSON strings for task-varying payload/features while keeping tabular columns."""
+    """Use JSON strings for task-varying raw event payloads while keeping tabular columns."""
     return {
         "event_id": row["event_id"],
         # ``event_sequence`` makes same-timestamp replay deterministic. It is
         # the durable ordering assigned when Everbench accepted the event.
         "event_sequence": row["sequence"],
         "event_available_at": row["inserted_at"].isoformat(),
-        "payload_json": json.dumps(row["features"], sort_keys=True, separators=(",", ":")),
+        "payload_json": json.dumps(row["event"], sort_keys=True, separators=(",", ":")),
         "label": row["y"],
         "label_reason": row["reason"],
         "label_available_at": row["available_at"].isoformat(),
@@ -193,20 +193,20 @@ def archive_once(sessions: sessionmaker[Session], task: ModuleType) -> int:
     return len(records)
 
 
-def latest_labelled_examples(manifests: list, limit: int = 5) -> list[tuple[str, dict[str, float], object]]:
+def latest_labelled_examples(manifests: list, limit: int = 5) -> list[tuple[str, dict[str, Any], object]]:
     """Read the last labelled records from Parquet manifests in event order."""
-    examples: list[tuple[str, dict[str, float], object]] = []
+    examples: list[tuple[str, dict[str, Any], object]] = []
     for manifest in manifests:
         if len(examples) >= limit:
             break
         parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
         # Archives written before the compact schema used ``features_json``;
         # retain read compatibility while new files use ``payload_json``.
-        feature_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
+        event_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
         for index in range(parquet.num_row_groups - 1, -1, -1):
-            rows = parquet.read_row_group(index, columns=["event_id", feature_column, "label"]).to_pylist()
+            rows = parquet.read_row_group(index, columns=["event_id", event_column, "label"]).to_pylist()
             for row in reversed(rows):
-                examples.append((row["event_id"], json.loads(row[feature_column]), row["label"]))
+                examples.append((row["event_id"], json.loads(row[event_column]), row["label"]))
                 if len(examples) == limit:
                     break
             if len(examples) == limit:

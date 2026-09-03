@@ -7,7 +7,7 @@
   </div>
 
   <section class="api-docs">
-    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for the signing key.</p>
+    <p>All requests need <code>X-API-Key</code>. Model uploads also need an HMAC signature in <code>X-Everbench-Artifact-Signature</code>. Ask <a href="mailto:maxhalford25@gmail.com">maxhalford25@gmail.com</a> for both the API key and the signing key.</p>
   </section>
 
   <section class="api-docs">
@@ -34,14 +34,14 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
     <h2>Model protocol</h2>
     <p>An upload is a cloudpickled Python object. Implement the prediction interface for the task type:</p>
     <ul class="model-protocol">
-      <li><strong>regression</strong> — <code>predict_one(features: dict[str, float], *, event_id: str | None = None) -&gt; float</code>.</li>
-      <li><strong>binary classification</strong> — <code>predict_proba_one(features: dict[str, float], *, event_id: str | None = None) -&gt; dict[object, float]</code>; <code>predict_one(features: dict[str, float], *, event_id: str | None = None) -&gt; object</code> is also accepted.</li>
-      <li><strong>multiclass classification</strong> — <code>predict_one(features: dict[str, float], *, event_id: str | None = None) -&gt; object</code> returns a class.</li>
-      <li><strong>clustering</strong> — <code>predict_one(features: dict[str, float], *, event_id: str | None = None) -&gt; object</code> returns a cluster identifier.</li>
-      <li><strong>anomaly detection</strong> — <code>score_one(features: dict[str, float], *, event_id: str | None = None) -&gt; float</code>; <code>predict_one(features: dict[str, float], *, event_id: str | None = None) -&gt; float</code> is also accepted.</li>
+      <li><strong>regression</strong> — <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; float</code>.</li>
+      <li><strong>binary classification</strong> — <code>predict_proba_one(event_id: str, event: dict[str, Any]) -&gt; dict[bool, float]</code>; <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; bool</code> is also accepted.</li>
+      <li><strong>multiclass classification</strong> — <code>predict_proba_one(event_id: str, event: dict[str, Any]) -&gt; dict[str, float]</code>; <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; str</code> is also accepted.</li>
+      <li><strong>clustering</strong> — <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; object</code> returns a cluster identifier.</li>
+      <li><strong>anomaly detection</strong> — <code>score_one(event_id: str, event: dict[str, Any]) -&gt; float</code>; <code>predict_one(event_id: str, event: dict[str, Any]) -&gt; float</code> is also accepted.</li>
     </ul>
-    <p><code>learn_one(features: dict[str, float], label: object) -&gt; None</code> is optional and receives each label when it becomes available.</p>
-    <p>Models that need an event ID can declare the optional <code>event_id</code> keyword on their normal prediction method. One-argument River-style methods remain supported.</p>
+    <p><code>learn_one(event_id: str, event: dict[str, Any], label: object) -&gt; None</code> is optional and receives each label when it becomes available.</p>
+    <p>Everbench always passes the raw accepted event and its ID. Models own feature extraction and can ignore either input when it is not useful.</p>
     <p>Upload validation deep-copies the model, predicts recent labelled examples, and learns from them when supported. This checks that the uploaded model works as expected without changing the uploaded object.</p>
   </section>
 
