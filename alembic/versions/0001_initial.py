@@ -1,4 +1,4 @@
-"""Initial shared Everbench schema.
+"""Initial shared everbench schema.
 
 Revision ID: 0001_initial
 Revises:

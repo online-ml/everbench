@@ -63,7 +63,7 @@ class BacktestApiTest(unittest.TestCase):
                     data={"model": (io.BytesIO(payload), "model.pkl"), "archive_sha256": "archive"},
                     headers={
                         "X-API-Key": "test-api-key",
-                        "X-Everbench-Artifact-Signature": signature,
+                        "X-everbench-Artifact-Signature": signature,
                     },
                 )
 

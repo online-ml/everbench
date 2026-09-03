@@ -2,7 +2,7 @@
 {% block title %}everbench — tasks{% endblock %}
 {% block content %}
   <h1>everbench</h1>
-  <p class="introduction">Run live predict-then-learn benchmarks, inspect tasks, and manage models through the <a href="{{ url_for('api_documentation') }}">API documentation</a>.</p>
+  <p class="introduction">This is a collection of benchmarks for evaluating machine learning models on infinite streaming tasks. See <a href="https://github.com/online-ml/everbench">source code</a> and <a href="{{ url_for('api_documentation') }}">API documentation</a>.</p>
   {% if tasks %}
     <ul class="task-list">
       {% for task in tasks %}
