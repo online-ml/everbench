@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import store
+from everbench import archive_store
 from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
 from everbench.models import PickledModel, metric_inputs_for, prediction_for
@@ -63,11 +63,18 @@ def _publish(task_name: str, week_start: str, content_sha256: str, payload: byte
     return str(output), output.stat().st_size
 
 
+def _s3_location(location: str) -> tuple[str, str] | None:
+    if not location.startswith("s3://"):
+        return None
+    bucket, key = location.removeprefix("s3://").split("/", 1)
+    if bucket != CONFIG.s3_bucket_name:
+        raise FileNotFoundError("archive is not in the configured R2 bucket")
+    return bucket, key
+
+
 def read_archive(location: str) -> bytes:
-    if location.startswith("s3://"):
-        bucket, key = location.removeprefix("s3://").split("/", 1)
-        if bucket != CONFIG.s3_bucket_name:
-            raise FileNotFoundError("archive is not in the configured R2 bucket")
+    if remote := _s3_location(location):
+        bucket, key = remote
         body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
         try:
             return body.read()
@@ -78,10 +85,8 @@ def read_archive(location: str) -> bytes:
 
 def stream_archive(location: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
     """Yield an archive without buffering the entire object in web-process memory."""
-    if location.startswith("s3://"):
-        bucket, key = location.removeprefix("s3://").split("/", 1)
-        if bucket != CONFIG.s3_bucket_name:
-            raise FileNotFoundError("archive is not in the configured R2 bucket")
+    if remote := _s3_location(location):
+        bucket, key = remote
         body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
         try:
             yield from body.iter_chunks(chunk_size=chunk_size)
@@ -94,10 +99,8 @@ def stream_archive(location: str, chunk_size: int = 1024 * 1024) -> Iterator[byt
 
 
 def archive_size(location: str) -> int:
-    if location.startswith("s3://"):
-        bucket, key = location.removeprefix("s3://").split("/", 1)
-        if bucket != CONFIG.s3_bucket_name:
-            raise FileNotFoundError("archive is not in the configured R2 bucket")
+    if remote := _s3_location(location):
+        bucket, key = remote
         return int(_s3_client().head_object(Bucket=bucket, Key=key)["ContentLength"])
     return Path(location).stat().st_size
 
@@ -192,10 +195,10 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
         raise RuntimeError("configure S3_BUCKET_NAME or EVERBENCH_ARCHIVE_ROOT for durable archives")
     cutoff = datetime.now(UTC) - timedelta(days=CONFIG.archive_after_days)
     with sessions() as session:
-        week_start = store.next_archive_week(session, task.TASK_NAME, cutoff)
+        week_start = archive_store.next_archive_week(session, task.TASK_NAME, cutoff)
         if week_start is None:
             return 0
-        rows = store.archive_rows(session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size)
+        rows = archive_store.archive_rows(session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size)
     if not rows:
         return 0
     records = [_record(row) for row in rows]
@@ -206,11 +209,13 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     location, byte_size = _publish(task.TASK_NAME, week_start.isoformat(), content_sha256, buffer.getvalue())
     event_ids = [record["event_id"] for record in records]
     with sessions.begin() as session:
-        store.record_archive(session, content_sha256, task.TASK_NAME, week_start, location, len(records), byte_size)
+        archive_store.record_archive(
+            session, content_sha256, task.TASK_NAME, week_start, location, len(records), byte_size
+        )
         # The manifest commits with the delete, and only after the immutable
         # file was atomically published. A failed cycle leaves source rows for
         # the next periodic attempt.
-        store.purge_archived_events(session, task.TASK_NAME, event_ids)
+        archive_store.purge_archived_events(session, task.TASK_NAME, event_ids)
     return len(records)
 
 

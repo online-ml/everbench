@@ -5,14 +5,8 @@ from __future__ import annotations
 import json
 from collections import OrderedDict
 from copy import deepcopy
-from dataclasses import dataclass
 from threading import RLock
 from typing import Any
-
-
-@dataclass(frozen=True)
-class HotEvent:
-    event: dict[str, Any]
 
 
 class HotStore:
@@ -25,7 +19,7 @@ class HotStore:
             raise ValueError("hot store maximum event size must be positive")
         self.capacity = capacity
         self.max_event_bytes = max_event_bytes
-        self._events: OrderedDict[str, HotEvent] = OrderedDict()
+        self._events: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # A label can arrive before the learner has processed it. Track only a
         # bounded set of those IDs so completed events can leave RAM promptly.
         self._labelled: OrderedDict[str, None] = OrderedDict()
@@ -34,13 +28,7 @@ class HotStore:
         self._bypasses = 0
         self._lock = RLock()
 
-    def put_event(self, event_id: str, event: dict[str, Any]) -> None:
-        self._put(event_id, event)
-
-    def put_payload(self, event_id: str, payload: dict[str, Any]) -> None:
-        self._put(event_id, payload)
-
-    def _put(self, event_id: str, event: dict[str, Any]) -> None:
+    def put(self, event_id: str, event: dict[str, Any]) -> None:
         """Cache JSON-sized payloads without sharing mutable references."""
         if self.max_event_bytes is not None:
             try:
@@ -56,7 +44,7 @@ class HotStore:
                     self._bypasses += 1
                 return
         with self._lock:
-            self._events[event_id] = HotEvent(deepcopy(event))
+            self._events[event_id] = deepcopy(event)
             self._events.move_to_end(event_id)
             self._trim()
 
@@ -93,7 +81,7 @@ class HotStore:
                 return None
             self._hits += 1
             self._events.move_to_end(event_id)
-            return deepcopy(event.event)
+            return deepcopy(event)
 
     def stats(self) -> dict[str, int]:
         with self._lock:

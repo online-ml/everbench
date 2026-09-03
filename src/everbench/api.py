@@ -30,12 +30,12 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.http import dump_options_header
 
-from everbench import archive, artifacts, store
+from everbench import archive, archive_store, artifacts, event_store, model_store, reporting
 from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
 from everbench.models import PickledModel, validate_model
-from everbench.tasks import load_task_named
+from everbench.tasks import TaskDefinition, load_task_named
 
 
 def format_duration(seconds: float) -> str:
@@ -118,10 +118,10 @@ def multipart_json(name: str, default: dict[str, Any] | None = None) -> dict[str
 
 def validation_examples(session: Session, task_name: str) -> list[tuple[str, dict[str, Any], Any]]:
     """Prefer fresh Postgres labels; archives make a durable fallback."""
-    examples = store.latest_labelled_examples(session, task_name, limit=5)
+    examples = event_store.latest_labelled_examples(session, task_name, limit=5)
     if len(examples) < 5:
         examples = (
-            archive.latest_labelled_examples(store.task_archives(session, task_name), limit=5 - len(examples))
+            archive.latest_labelled_examples(archive_store.task_archives(session, task_name), limit=5 - len(examples))
             + examples
         )
     return examples
@@ -142,8 +142,9 @@ def task_source_url(task) -> str:
     return f"https://github.com/online-ml/everbench/blob/main/{relative_path}"
 
 
-def task_snapshot(session: Session, task_name: str) -> dict[str, Any]:
-    heartbeats = [heartbeat for heartbeat in store.worker_health(session) if heartbeat.task_name == task_name]
+def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
+    task_name = task.TASK_NAME
+    heartbeats = [heartbeat for heartbeat in reporting.worker_health(session) if heartbeat.task_name == task_name]
     runtime = next((heartbeat for heartbeat in heartbeats if heartbeat.role == "task-runtime"), None)
     hot_store: dict[str, int] | None = None
     if runtime and runtime.detail:
@@ -154,9 +155,9 @@ def task_snapshot(session: Session, task_name: str) -> dict[str, Any]:
         except ValueError:
             hot_store = None
     return {
-        "stats": store.task_stats(session, task_name),
-        "leaderboard": store.task_leaderboard(session, task_name),
-        "metric_names": store.task_metric_names(session, task_name),
+        "stats": reporting.task_stats(session, task_name),
+        "leaderboard": reporting.task_leaderboard(session, task_name),
+        "metric_names": metric_definition(task.PROBLEM_TYPE, task.METRICS)["metric_names"],
         "hot_store": hot_store,
     }
 
@@ -191,7 +192,7 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
-        return render_template("tasks.html", tasks=store.task_names(_session()))
+        return render_template("tasks.html", tasks=reporting.task_names(_session()))
 
     @app.get("/api")
     def api_documentation() -> str:
@@ -200,36 +201,37 @@ def create_app(
     @app.get("/tasks/<task_name>")
     def task_dashboard(task_name: str) -> str:
         task = task_or_404(task_name)
-        snapshot = task_snapshot(_session(), task_name)
+        snapshot = task_snapshot(_session(), task)
         return render_template(
             "task.html",
             task_name=task_name,
             task_type=task.PROBLEM_TYPE,
             task_source_url=task_source_url(task),
             task_description=task.DESCRIPTION_HTML,
-            archives=store.task_archives(_session(), task_name),
+            archives=archive_store.task_archives(_session(), task_name),
             **snapshot,
         )
 
     @app.get("/tasks/<task_name>/panel")
     def task_panel(task_name: str) -> Response:
         """HTML fragment polled by HTMX on the task dashboard."""
+        task = task_or_404(task_name)
         response = make_response(
-            render_template("_task_panel.html", task_name=task_name, **task_snapshot(_session(), task_name))
+            render_template("_task_panel.html", task_name=task_name, **task_snapshot(_session(), task))
         )
         response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.get("/tasks/<task_name>/models/<model_id>/detail")
     def model_detail(task_name: str, model_id: str) -> str:
-        detail = store.model_detail(_session(), task_name, model_id)
+        detail = reporting.model_detail(_session(), task_name, model_id)
         if detail is None:
             abort(404)
         return render_template("_model_detail.html", model=detail)
 
     @app.get("/api/tasks/<task_name>/archives/<content_sha256>")
     def download_archive(task_name: str, content_sha256: str) -> Response:
-        manifest = store.task_archive(_session(), task_name, content_sha256)
+        manifest = archive_store.task_archive(_session(), task_name, content_sha256)
         if manifest is None:
             abort(404)
         filename = f"{task_name}-{manifest.event_date.isoformat()}-{content_sha256[:12]}.parquet"
@@ -262,7 +264,7 @@ def create_app(
                     "last_seen_at": heartbeat.last_seen_at.isoformat(),
                     "stale": (now - heartbeat.last_seen_at).total_seconds() > runtime_config.heartbeat_seconds * 2,
                 }
-                for heartbeat in store.worker_health(_session())
+                for heartbeat in reporting.worker_health(_session())
             ]
         )
 
@@ -324,16 +326,16 @@ def create_app(
                 "class_definition": class_definition,
                 "class_name": class_name,
             }
-            artifact_record = store.store_artifact(session, payload, signature, metadata)
+            artifact_record = model_store.store_artifact(session, payload, signature, metadata)
             definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
-            store.record_artifact_validation(artifact_record, task_name, definition, example_count)
-            store.lock_model_registrations(session, task_name)
-            existing = store.model_registration(session, task_name, model_id.strip())
-            if (existing is None or not existing.active) and store.active_model_count(
+            model_store.record_artifact_validation(artifact_record, task_name, definition, example_count)
+            model_store.lock_model_registrations(session, task_name)
+            existing = model_store.model_registration(session, task_name, model_id.strip())
+            if (existing is None or not existing.active) and model_store.active_model_count(
                 session, task_name
             ) >= runtime_config.max_active_models_per_task:
                 raise ValueError(f"a task may have at most {runtime_config.max_active_models_per_task} active models")
-            registration, created = store.register_model(
+            registration, created = model_store.register_model(
                 session, task_name, model_id.strip(), owner.strip(), artifact_record.artifact_id
             )
             session.commit()
@@ -353,7 +355,7 @@ def create_app(
     @require_api_key
     def remove_model(task_name: str, model_id: str) -> Response | tuple[Response, int]:
         session = _session()
-        if not store.delete_model(session, task_name, model_id):
+        if not model_store.delete_model(session, task_name, model_id):
             return jsonify(error="no model with that ID"), 404
         session.commit()
         return jsonify(task_name=task_name, model_id=model_id, deleted=True)
@@ -380,7 +382,7 @@ def create_app(
         if not is_trusted:
             return jsonify(error="invalid model signature"), 400
         session = _session()
-        manifest = store.task_archive(session, task_name, archive_sha256)
+        manifest = archive_store.task_archive(session, task_name, archive_sha256)
         if manifest is None:
             return jsonify(error="archive not found"), 404
         try:

@@ -14,10 +14,12 @@ from types import FrameType
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench.archive import archive_once, storage_configured
+from everbench.collectors import collect_events, collect_labels
 from everbench.config import CONFIG
+from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
+from everbench.learner import learner
 from everbench.tasks import TaskDefinition
-from everbench.workers import Heartbeat, collect_events, collect_labels, learner
 
 Failure = tuple[str, BaseException]
 

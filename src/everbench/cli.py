@@ -11,10 +11,10 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 
 from alembic import command
-from everbench import artifacts, store
+from everbench import artifacts, reporting
+from everbench.collectors import collect_events, collect_labels
 from everbench.db import advisory_key, make_engine, make_session_factory
 from everbench.tasks import discover_tasks, load_task
-from everbench.workers import collect_events, collect_labels
 
 
 def configure_logging() -> None:
@@ -92,7 +92,7 @@ def collect_labels_command(task_file: str) -> None:
 def learner(task_file: str, once: bool) -> None:
     """Predict then train active models for TASK_FILE."""
     task = load_task(task_file)
-    from everbench.workers import learner as run_learner
+    from everbench.learner import learner as run_learner
 
     run_learner(make_session_factory(), task, once)
 
@@ -103,7 +103,7 @@ def report(task_file: str) -> None:
     """Print persisted River metrics for TASK_FILE."""
     task = load_task(task_file)
     with make_session_factory()() as session:
-        rows = store.task_leaderboard(session, task.TASK_NAME)
+        rows = reporting.task_leaderboard(session, task.TASK_NAME)
     for row in rows:
         metrics = " ".join(f"{name}={value:.6f}" for name, value in row["metrics"].items() if value is not None)
         click.echo(f"{row['model_id']}: predictions={row['predictions']} labels={row['labels']} {metrics}".rstrip())
