@@ -34,14 +34,14 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
     <h2>Model protocol</h2>
     <p>An upload is a cloudpickled Python object. Implement the prediction interface for the task type:</p>
     <ul class="model-protocol">
-      <li><strong>regression</strong> — <code>predict_one(features)</code> returns a numeric prediction.</li>
-      <li><strong>binary classification</strong> — <code>predict_proba_one(features)</code> returns class-to-probability mappings; <code>predict_one(features)</code> is also accepted.</li>
-      <li><strong>multiclass classification</strong> — <code>predict_one(features)</code> returns a class.</li>
-      <li><strong>clustering</strong> — <code>predict_one(features)</code> returns a cluster identifier.</li>
-      <li><strong>anomaly detection</strong> — <code>score_one(features)</code> returns an anomaly score; <code>predict_one(features)</code> is also accepted.</li>
+      <li><strong>regression</strong> — <code>predict_one(features: dict[str, float]) -&gt; float</code>.</li>
+      <li><strong>binary classification</strong> — <code>predict_proba_one(features: dict[str, float]) -&gt; dict[object, float]</code>; <code>predict_one(features: dict[str, float]) -&gt; object</code> is also accepted.</li>
+      <li><strong>multiclass classification</strong> — <code>predict_one(features: dict[str, float]) -&gt; object</code> returns a class.</li>
+      <li><strong>clustering</strong> — <code>predict_one(features: dict[str, float]) -&gt; object</code> returns a cluster identifier.</li>
+      <li><strong>anomaly detection</strong> — <code>score_one(features: dict[str, float]) -&gt; float</code>; <code>predict_one(features: dict[str, float]) -&gt; float</code> is also accepted.</li>
     </ul>
-    <p><code>learn_one(features, label)</code> is optional and receives each label when it becomes available.</p>
-    <p>A model may instead implement <code>predict_event(event_id, features)</code> when a task requires event context.</p>
+    <p><code>learn_one(features: dict[str, float], label: object) -&gt; None</code> is optional and receives each label when it becomes available.</p>
+    <p>A model may instead implement <code>predict_event(event_id: str, features: dict[str, float]) -&gt; object</code> when a task requires event context.</p>
     <p>Upload validation deep-copies the model and exercises it on up to five recent labelled examples.</p>
   </section>
 
