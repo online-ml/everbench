@@ -29,6 +29,14 @@ dev = [
     "ruff>=0.16.5",
     "ty>=0.0.77",
 ]
+upload-models = [
+    "openai>=3.7.0,<4.0.0",
+    "scikit-learn>=1.9.0,<2.0.0",
+    "vowpalwabbit>=9.11.2,<10.0.0",
+]
+
+[tool.uv]
+default-groups = ["dev", "upload-models"]
 
 [tool.ruff]
 line-length = 120
