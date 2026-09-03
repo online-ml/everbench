@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import io
 import json
 import os
@@ -91,23 +90,6 @@ def multipart_json(name: str, default: dict[str, Any] | None = None) -> dict[str
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def displayed_class_definition(source: str, class_name: str) -> str:
-    """Keep the dashboard focused on the uploaded model's class.
-
-    A source file is accepted so callers can simply use curl's ``<file``
-    syntax. When it is valid Python, retain only the matching top-level class;
-    this is presentation metadata and never used to reconstruct the model.
-    """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return source
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return ast.get_source_segment(source, node) or source
-    return source
 
 
 def validation_examples(session: Session, task_name: str) -> list[tuple[str, dict[str, Any], Any]]:
@@ -282,7 +264,7 @@ def create_app() -> Flask:
             class_name = type(artifacts.loads(payload, signature)).__name__
             metadata = {
                 **metadata,
-                "class_definition": displayed_class_definition(class_definition, class_name),
+                "class_definition": class_definition,
                 "class_name": class_name,
             }
             artifact_record = store.store_artifact(session, payload, signature, metadata)
@@ -313,10 +295,10 @@ def create_app() -> Flask:
     @require_api_key
     def remove_model(task_name: str, model_id: str) -> Response | tuple[Response, int]:
         session = _session()
-        if not store.deactivate_model(session, task_name, model_id):
-            return jsonify(error="no active model with that ID"), 404
+        if not store.delete_model(session, task_name, model_id):
+            return jsonify(error="no model with that ID"), 404
         session.commit()
-        return jsonify(task_name=task_name, model_id=model_id, active=False)
+        return jsonify(task_name=task_name, model_id=model_id, deleted=True)
 
     @app.post("/api/tasks/<task_name>/backtest")
     @require_api_key

@@ -531,11 +531,36 @@ def register_model(
     return registration, True
 
 
-def deactivate_model(session: Session, task_name: str, model_id: str) -> bool:
+def _delete_unreferenced_artifacts(session: Session, artifact_ids: set[str]) -> None:
+    if not artifact_ids:
+        return
+    registered_ids = select(ModelRegistration.artifact_id).where(ModelRegistration.artifact_id.is_not(None))
+    snapshot_ids = select(ModelSnapshot.artifact_id)
+    session.execute(
+        delete(ModelArtifact).where(
+            ModelArtifact.artifact_id.in_(artifact_ids),
+            ModelArtifact.artifact_id.not_in(registered_ids),
+            ModelArtifact.artifact_id.not_in(snapshot_ids),
+        )
+    )
+
+
+def delete_model(session: Session, task_name: str, model_id: str) -> bool:
+    """Remove a registration and all state that belongs only to that model."""
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
-    if registration is None or not registration.active:
+    if registration is None:
         return False
-    registration.active = False
+    snapshot_artifact_id = session.scalar(
+        select(ModelSnapshot.artifact_id).where(
+            ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id
+        )
+    )
+    for model_table in (Prediction, PredictionSkip, Training, MetricUpdate, MetricState, ModelSnapshot):
+        session.execute(delete(model_table).where(model_table.task_name == task_name, model_table.model_id == model_id))
+    artifact_ids = {artifact_id for artifact_id in (registration.artifact_id, snapshot_artifact_id) if artifact_id}
+    session.delete(registration)
+    session.flush()
+    _delete_unreferenced_artifacts(session, artifact_ids)
     return True
 
 
@@ -708,16 +733,7 @@ def save_pickle_snapshot(
     )
     session.execute(statement)
     stale_ids = {previous_artifact_id} - {artifact_record.artifact_id} if previous_artifact_id else set()
-    if stale_ids:
-        registered_ids = select(ModelRegistration.artifact_id).where(ModelRegistration.artifact_id.is_not(None))
-        snapshot_ids = select(ModelSnapshot.artifact_id)
-        session.execute(
-            delete(ModelArtifact).where(
-                ModelArtifact.artifact_id.in_(stale_ids),
-                ModelArtifact.artifact_id.not_in(registered_ids),
-                ModelArtifact.artifact_id.not_in(snapshot_ids),
-            )
-        )
+    _delete_unreferenced_artifacts(session, stale_ids)
     return artifact_record
 
 

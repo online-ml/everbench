@@ -47,7 +47,7 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
 
   <section class="api-docs">
     <h2>Delete a model</h2>
-    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> retires a model. Model IDs are immutable: upload a replacement with a new ID so its metrics start independently.</p>
+    <p><code>DELETE /api/tasks/&lt;task&gt;/models/&lt;model&gt;</code> removes a model and its metrics. Uploading afterward creates a fresh registration, with independent metrics.</p>
   </section>
 
   <section class="api-docs">

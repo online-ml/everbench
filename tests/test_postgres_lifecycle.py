@@ -141,19 +141,20 @@ class PostgresLifecycleTest(unittest.TestCase):
             self.assertEqual(leaderboard["broken"]["label_errors"], 1)
             self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
 
-    def test_retired_model_ids_are_not_reused(self) -> None:
+    def test_deleted_model_ids_start_fresh_registrations(self) -> None:
         os.environ["EVERBENCH_MODEL_SIGNING_KEY"] = "postgres-test-signing-key"
         task_name = f"retired-model-test-{uuid4()}"
         with self.sessions.begin() as session:
             payload = artifacts.dumps(WorkingModel())
             artifact = store.store_artifact(session, payload, artifacts.sign(payload), {})
             store.register_model(session, task_name, "original", "test", artifact.artifact_id)
-            self.assertTrue(store.deactivate_model(session, task_name, "original"))
+            self.assertTrue(store.delete_model(session, task_name, "original"))
 
         with self.sessions() as session:
             self.assertEqual(store.task_leaderboard(session, task_name), [])
-            with self.assertRaisesRegex(ValueError, "already been used"):
-                store.register_model(session, task_name, "original", "test", artifact.artifact_id)
+            registration, created = store.register_model(session, task_name, "original", "test", artifact.artifact_id)
+            self.assertTrue(created)
+            self.assertEqual(registration.model_id, "original")
 
     def test_stream_cursor_is_updated_atomically(self) -> None:
         task_name = f"cursor-test-{uuid4()}"
