@@ -39,7 +39,7 @@
                   <p class="muted">The class definition was not recorded for this legacy model.</p>
                 {% endif %}
               </template>
-              {% if row.last_error %}
+              {% if row.disabled_until %}
                 <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
                 <template>
                   <p>{% if row.disabled_until %}Paused after {{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}; retry after {{ row.disabled_until.isoformat() }}.{% else %}{{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}.{% endif %}</p>
