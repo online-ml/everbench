@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from everbench.tasks import discover_tasks
+from everbench.tasks import discover_tasks, load_task
 
 TASK = """
 from river import metrics
@@ -49,3 +49,15 @@ class TaskDiscoveryTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "unique"):
                 discover_tasks(root)
+
+    def test_wiki_task_accepts_a_live_reverted_tag_event(self) -> None:
+        task = load_task("tasks/wiki_leftwing/task.py")
+        event = {
+            "database": "enwiki",
+            "rev_id": 123,
+            "tags": ["visualeditor", "mw-reverted"],
+            "prior_state": {"tags": ["visualeditor"]},
+        }
+
+        self.assertEqual(task.NEGATIVE_LABEL_DELAY_SECONDS, 48 * 60 * 60)
+        self.assertEqual(task.label_for(event), ("enwiki:123", 1, "mw-reverted"))

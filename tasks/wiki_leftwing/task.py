@@ -11,14 +11,14 @@ from river import metrics
 
 TASK_NAME = "wiki-leftwing"
 DESCRIPTION_HTML = """
-<p>Predict whether an English Wikipedia article edit will be reverted. A reversion tag is a positive label; edits without one after 24 hours are labelled valid.</p>
+<p>Predict whether an English Wikipedia article edit receives MediaWiki’s <code>mw-reverted</code> tag within 48 hours. Edits without that tag by the deadline receive a negative label.</p>
 """
 PROBLEM_TYPE = "binary_classification"
 METRICS = (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
 EVENT_STREAM_URL = "https://stream.wikimedia.org/v2/stream/recentchange"
 LABEL_STREAM_URL = "https://stream.wikimedia.org/v2/stream/mediawiki.revision-tags-change"
 WIKI = "enwiki"
-NEGATIVE_LABEL_DELAY_SECONDS = 24 * 60 * 60
+NEGATIVE_LABEL_DELAY_SECONDS = 48 * 60 * 60
 
 
 def event_id(event: dict) -> str | None:
@@ -54,7 +54,8 @@ def label_for(event: dict) -> tuple[str, int, str] | None:
     """Return a label emitted by the label stream, or ``None`` to ignore it."""
     current = event.get("tags") or []
     previous = (event.get("prior_state") or {}).get("tags") or []
-    if event.get("wiki") != WIKI or not isinstance(current, list) or not isinstance(previous, list):
+    wiki = event.get("wiki") or event.get("database")
+    if wiki != WIKI or not isinstance(current, list) or not isinstance(previous, list):
         return None
     if "mw-reverted" not in set(current) - set(previous):
         return None
