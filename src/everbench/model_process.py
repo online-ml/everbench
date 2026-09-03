@@ -81,9 +81,7 @@ class IsolatedModel:
     def _receive(self, operation: str) -> Any:
         if not self._connection.poll(self.timeout_seconds):
             self._terminate()
-            raise TimeoutError(
-                f"{self.model_id} {operation} exceeded the {self.timeout_seconds:.1f}s operation limit"
-            )
+            raise TimeoutError(f"{self.model_id} {operation} exceeded the {self.timeout_seconds:.1f}s operation limit")
         try:
             message = self._connection.recv()
         except EOFError as error:
