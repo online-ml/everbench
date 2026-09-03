@@ -11,18 +11,6 @@
   </section>
 
   <section class="api-docs">
-    <h2>Model protocol</h2>
-    <p>An upload is a cloudpickled Python object. It must implement one prediction method: <code>predict_one(features)</code>; for binary classification, <code>predict_proba_one(features)</code> may instead return class-to-probability mappings; for anomaly detection, <code>score_one(features)</code> is also accepted. A task-specific model may implement <code>predict_event(event_id, features)</code> when it needs an event ID.</p>
-    <p><code>learn_one(features, y)</code> is optional. Everbench calls it after the corresponding label becomes available. Before registration, Everbench deep-copies the upload and exercises prediction and learning against up to five recent labelled examples.</p>
-    <pre><code>class Model:
-    def predict_one(self, features: dict[str, float]) -> float:
-        ...
-
-    def learn_one(self, features: dict[str, float], y: int) -> None:  # optional
-        ...</code></pre>
-  </section>
-
-  <section class="api-docs">
     <h2>Upload a model</h2>
     <p><code>POST /api/tasks/&lt;task&gt;/models</code> accepts multipart fields <code>model</code>, <code>model_id</code>, <code>owner</code>, and <code>class_definition</code>. Models are serialized with <a href="https://github.com/cloudpipe/cloudpickle">cloudpickle</a>.</p>
     <p>Save this standard-library script as <code>sign_model.py</code> in your model project:</p>
@@ -40,6 +28,19 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
   -F 'model_id=my-model' \
   -F 'owner=your-name' \
   -F 'class_definition=&lt;your_model.py'</code></pre>
+  </section>
+
+  <section class="api-docs">
+    <h2>Model protocol</h2>
+    <p>An upload is a cloudpickled Python object. Implement the prediction interface for the task type:</p>
+    <ul class="model-protocol">
+      <li><strong>regression</strong> — <code>predict_one(features)</code> returns a numeric prediction.</li>
+      <li><strong>binary classification</strong> — <code>predict_proba_one(features)</code> returns class-to-probability mappings; <code>predict_one(features)</code> is also accepted.</li>
+      <li><strong>multiclass classification</strong> — <code>predict_one(features)</code> returns a class.</li>
+      <li><strong>clustering</strong> — <code>predict_one(features)</code> returns a cluster identifier.</li>
+      <li><strong>anomaly detection</strong> — <code>score_one(features)</code> returns an anomaly score; <code>predict_one(features)</code> is also accepted.</li>
+    </ul>
+    <p><code>learn_one(features, label)</code> is optional and receives each label when it becomes available. A model may instead implement <code>predict_event(event_id, features)</code> when a task requires event context. Upload validation deep-copies the model and exercises it on up to five recent labelled examples.</p>
   </section>
 
   <section class="api-docs">

@@ -50,6 +50,8 @@ tbody tr:nth-child(odd) { background: #f3f3f3; }
 .api-list div { margin: 10px 0; }
 .api-list dt { font-weight: 700; }
 .api-list dd { margin: 2px 0 0; color: #444; }
+.model-protocol { margin: 8px 0; padding-left: 20px; }
+.model-protocol li { margin: 4px 0; }
 pre { overflow-x: auto; margin: 10px 0 0; padding: 10px; background: #f3f3f3; font: inherit; line-height: 1.5; }
 .updated { position: fixed; right: 20px; bottom: 14px; margin: 0; color: #666; font-size: 12px; }
 @media (max-width: 640px) { header, main { padding: 14px; } table { font-size: 12px; } th, td { padding: 6px; } }
