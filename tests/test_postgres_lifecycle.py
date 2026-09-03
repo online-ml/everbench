@@ -151,6 +151,7 @@ class PostgresLifecycleTest(unittest.TestCase):
             self.assertTrue(store.deactivate_model(session, task_name, "original"))
 
         with self.sessions() as session:
+            self.assertEqual(store.task_leaderboard(session, task_name), [])
             with self.assertRaisesRegex(ValueError, "already been used"):
                 store.register_model(session, task_name, "original", "test", artifact.artifact_id)
 

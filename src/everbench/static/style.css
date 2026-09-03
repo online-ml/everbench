@@ -24,6 +24,10 @@ th, td { padding: 8px; text-align: left; vertical-align: top; }
 .table-scroll { overflow-x: auto; }
 .leaderboard { width: max-content; min-width: 100%; }
 .leaderboard th, .leaderboard td { white-space: nowrap; }
+.leaderboard th:first-child, .leaderboard td:first-child { position: sticky; left: 0; z-index: 1; }
+.leaderboard th:first-child { z-index: 2; background: #fff; }
+.leaderboard tbody tr:nth-child(odd) td:first-child { background: #f3f3f3; }
+.leaderboard tbody tr:nth-child(even) td:first-child { background: #fff; }
 th { font-weight: 700; }
 .leaderboard td.number { text-align: right; }
 .sort-control { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; text-align: left; }

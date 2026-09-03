@@ -823,7 +823,7 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                LEFT JOIN model_snapshots AS snapshot
                  ON snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
                LEFT JOIN model_artifacts AS snapshot_artifact ON snapshot_artifact.artifact_id = snapshot.artifact_id
-               WHERE model.task_name = :task_name
+               WHERE model.task_name = :task_name AND model.active
                ORDER BY model.model_id"""
         ),
         {"task_name": task_name},
