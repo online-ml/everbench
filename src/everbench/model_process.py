@@ -55,9 +55,17 @@ def _serve_model(connection: Connection, model_id: str, payload: bytes, signatur
 class IsolatedModel:
     """A stateful model proxy whose operations have a real wall-clock deadline."""
 
-    def __init__(self, model_id: str, payload: bytes, signature: str, timeout_seconds: float):
+    def __init__(
+        self,
+        model_id: str,
+        payload: bytes,
+        signature: str,
+        timeout_seconds: float,
+        startup_timeout_seconds: float = 10.0,
+    ):
         self.model_id = model_id
         self.timeout_seconds = timeout_seconds
+        self.startup_timeout_seconds = max(startup_timeout_seconds, timeout_seconds)
         context = multiprocessing.get_context("spawn")
         self._connection, child_connection = context.Pipe()
         self._process = context.Process(
@@ -69,7 +77,7 @@ class IsolatedModel:
         self._process.start()
         child_connection.close()
         try:
-            capabilities = self._receive("load")
+            capabilities = self._receive("load", self.startup_timeout_seconds)
         except BaseException:
             self._terminate()
             raise
@@ -78,10 +86,11 @@ class IsolatedModel:
         self.supports_scoring = bool(capabilities["supports_scoring"])
         self.class_name = str(capabilities["class_name"])
 
-    def _receive(self, operation: str) -> Any:
-        if not self._connection.poll(self.timeout_seconds):
+    def _receive(self, operation: str, timeout_seconds: float | None = None) -> Any:
+        limit = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        if not self._connection.poll(limit):
             self._terminate()
-            raise TimeoutError(f"{self.model_id} {operation} exceeded the {self.timeout_seconds:.1f}s operation limit")
+            raise TimeoutError(f"{self.model_id} {operation} exceeded the {limit:.1f}s operation limit")
         try:
             message = self._connection.recv()
         except EOFError as error:
