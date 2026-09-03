@@ -139,8 +139,9 @@ class ModelRegistration(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disabled_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    prediction_errors: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
-    label_errors: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    skipped_predictions: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    skipped_labels: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

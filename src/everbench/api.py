@@ -25,14 +25,6 @@ from everbench.models import validate_uploaded_model
 from everbench.tasks import load_task_named
 
 
-def format_percent(value: float | None) -> str:
-    """Format a rate for compact display without concealing tiny nonzero values."""
-    if value is None:
-        return "—"
-    percentage = 100 * float(value)
-    return "<0.1%" if 0 < percentage < 0.1 else f"{percentage:.1f}%"
-
-
 def format_duration(seconds: float) -> str:
     """Format a short, stable human duration for operational UI messages."""
     seconds = max(0, round(seconds))
@@ -175,7 +167,6 @@ def create_app() -> Flask:
 
     app.add_template_filter(format_number, "number")
     app.add_template_filter(format_file_size, "file_size")
-    app.add_template_filter(format_percent, "percent")
     app.add_template_filter(format_time_since, "time_since")
     app.add_template_filter(format_time_until, "time_until")
 

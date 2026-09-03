@@ -451,9 +451,11 @@ def learn_once(
 ) -> list[tuple[str, int, int, int]]:
     cache = cache if cache is not None else {}
     results = []
+    initially_disabled_model_ids = set()
     for registration in store.disabled_registrations(session, task.TASK_NAME):
         cache.pop(registration.model_id, None)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
+        initially_disabled_model_ids.add(registration.model_id)
     for registration, cached in _active_models(session, task, cache):
         try:
             with session.begin_nested():
@@ -474,6 +476,8 @@ def learn_once(
             store.record_model_success(session, task.TASK_NAME, registration.model_id)
         results.append((registration.model_id, trained, predicted, evaluated))
     for registration in store.disabled_registrations(session, task.TASK_NAME):
+        if registration.model_id in initially_disabled_model_ids:
+            continue
         cache.pop(registration.model_id, None)
         store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
     if hot is not None:

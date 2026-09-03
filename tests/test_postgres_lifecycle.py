@@ -127,9 +127,8 @@ class PostgresLifecycleTest(unittest.TestCase):
             leaderboard = {row["model_id"]: row for row in store.task_leaderboard(session, task_name)}
             self.assertGreater(leaderboard["working"]["model_bytes"], 0)
             self.assertIsNotNone(leaderboard["working"]["created_at"])
-            self.assertEqual(leaderboard["broken"]["prediction_errors"], 1)
-            self.assertEqual(leaderboard["broken"]["label_errors"], 0)
-            self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
+            self.assertEqual(leaderboard["broken"]["error_count"], 1)
+            self.assertEqual(leaderboard["broken"]["skipped"], 1)
 
         with self.sessions.begin() as session:
             store.add_labels(session, task_name, [("event", 1, "test")], delay_seconds=None)
@@ -137,9 +136,8 @@ class PostgresLifecycleTest(unittest.TestCase):
 
         with self.sessions() as session:
             leaderboard = {row["model_id"]: row for row in store.task_leaderboard(session, task_name)}
-            self.assertEqual(leaderboard["broken"]["prediction_errors"], 1)
-            self.assertEqual(leaderboard["broken"]["label_errors"], 1)
-            self.assertEqual(leaderboard["broken"]["error_rate"], 1.0)
+            self.assertEqual(leaderboard["broken"]["error_count"], 1)
+            self.assertEqual(leaderboard["broken"]["skipped"], 2)
             checkpoint = store.latest_snapshot(session, task_name, "broken")
             self.assertIsNotNone(checkpoint)
             assert checkpoint is not None

@@ -585,6 +585,7 @@ def record_model_failure(
     if registration is None:
         return None
     registration.failure_count += 1
+    registration.error_count += 1
     registration.last_error = f"{type(error).__name__}: {error}"[:2_000]
     now = datetime.now(UTC)
     registration.failed_at = now
@@ -653,19 +654,19 @@ def record_disabled_work(
     events = labelled + unpredicted_events(
         session, task_name, registration.model_id, registration.start_sequence, max(limit - len(labelled), 0)
     )
-    prediction_errors = len(add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled"))
+    skipped_predictions = len(add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled"))
     labels = untrained_labels(session, task_name, registration.model_id, limit)
     trained_event_ids = add_trainings(session, task_name, registration.model_id, [event_id for event_id, *_ in labels])
-    label_errors = len(trained_event_ids)
+    skipped_labels = len(trained_event_ids)
     if trained_event_ids:
         trained_event_id_set = set(trained_event_ids)
         last = max(
             (label for label in labels if label[0] in trained_event_id_set), key=lambda label: (label[2], label[3])
         )
         advance_model_checkpoint(session, task_name, registration, last[2], last[3])
-    registration.prediction_errors += prediction_errors
-    registration.label_errors += label_errors
-    return prediction_errors, label_errors
+    registration.skipped_predictions += skipped_predictions
+    registration.skipped_labels += skipped_labels
+    return skipped_predictions, skipped_labels
 
 
 def model_registration(session: Session, task_name: str, model_id: str) -> ModelRegistration | None:
@@ -869,22 +870,15 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
                       model.last_error,
                       model.failed_at,
                       model.disabled_until,
-                      model.prediction_errors,
-                      model.label_errors,
+                      model.error_count,
+                      model.skipped_predictions + model.skipped_labels AS skipped,
                       model.created_at,
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
                       COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
                       COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes,
                       COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
-                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name,
-                      CASE
-                        WHEN COALESCE(metric_state.predictions, 0) + COALESCE(metric_state.observations, 0)
-                             + model.prediction_errors + model.label_errors > 0
-                        THEN (model.prediction_errors + model.label_errors)::float
-                             / (COALESCE(metric_state.predictions, 0) + COALESCE(metric_state.observations, 0)
-                                + model.prediction_errors + model.label_errors)
-                      END AS error_rate
+                      COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id

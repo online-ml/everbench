@@ -19,11 +19,10 @@
       <thead>
         <tr>
           <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="text">owner</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="date">uploaded</button></th>
           <th><button class="sort-control" type="button" data-sort-type="number">predictions</button></th>
           <th><button class="sort-control" type="button" data-sort-type="number">labels</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">failures</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="number">errors</button></th>
+          <th><button class="sort-control" type="button" data-sort-type="number">skipped</button></th>
           <th><button class="sort-control" type="button" data-sort-type="number">memory</button></th>
           {% for metric_name in metric_names %}<th><button class="sort-control" type="button" data-sort-type="number">{{ metric_name }}</button></th>{% endfor %}
         </tr>
@@ -34,6 +33,7 @@
             <td data-sort-value="{{ row.model_id }}">
               <button class="model-name" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
               <template>
+                <p class="model-tags"><span>owner: {{ row.owner }}</span> <span>uploaded: <time data-relative-time datetime="{{ row.created_at.isoformat() }}"></time></span></p>
                 {% if row.class_definition %}
                   <pre><code>{{ row.class_definition }}</code></pre>
                 {% else %}
@@ -48,11 +48,10 @@
                 </template>
               {% endif %}
             </td>
-            <td data-sort-value="{{ row.owner }}">{{ row.owner }}</td>
-            <td class="number" data-sort-value="{{ row.created_at.isoformat() }}"><time data-relative-time datetime="{{ row.created_at.isoformat() }}"></time></td>
             <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
             <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
-            <td class="number" data-sort-value="{{ row.error_rate if row.error_rate is not none else '' }}">{{ row.error_rate|percent }}</td>
+            <td class="number" data-sort-value="{{ row.error_count }}">{{ row.error_count|number }}</td>
+            <td class="number" data-sort-value="{{ row.skipped }}">{{ row.skipped|number }}</td>
             <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
             {% for metric_name in metric_names %}<td class="number" data-sort-value="{{ row.metrics.get(metric_name, '') }}">{{ "%.3f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
           </tr>

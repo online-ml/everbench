@@ -108,6 +108,7 @@
       const dialog = document.querySelector('[data-persistent-model-dialog]');
       dialog.querySelector('[data-model-dialog-heading]').textContent = trigger.dataset.modelDialogHeading;
       dialog.querySelector('[data-model-dialog-content]').replaceChildren(template.content.cloneNode(true));
+      updateRelativeTimes();
       if (!dialog.open) dialog.showModal();
     });
 
