@@ -40,7 +40,9 @@ curl -X POST http://127.0.0.1:8000/api/tasks/dummy/models \
       <li><strong>clustering</strong> — <code>predict_one(features)</code> returns a cluster identifier.</li>
       <li><strong>anomaly detection</strong> — <code>score_one(features)</code> returns an anomaly score; <code>predict_one(features)</code> is also accepted.</li>
     </ul>
-    <p><code>learn_one(features, label)</code> is optional and receives each label when it becomes available. A model may instead implement <code>predict_event(event_id, features)</code> when a task requires event context. Upload validation deep-copies the model and exercises it on up to five recent labelled examples.</p>
+    <p><code>learn_one(features, label)</code> is optional and receives each label when it becomes available.</p>
+    <p>A model may instead implement <code>predict_event(event_id, features)</code> when a task requires event context.</p>
+    <p>Upload validation deep-copies the model and exercises it on up to five recent labelled examples.</p>
   </section>
 
   <section class="api-docs">
