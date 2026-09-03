@@ -10,7 +10,7 @@ from unittest.mock import patch
 from sqlalchemy.orm import Session
 
 from everbench import artifacts
-from everbench.api import display_enum, validation_examples
+from everbench.api import validation_examples
 from everbench.batching import TimedBatch
 from everbench.models import validate_uploaded_model
 from everbench.workers import _load_model
@@ -72,9 +72,6 @@ class RuntimeHardeningTest(unittest.TestCase):
         payload = artifacts.dumps(ConstantModel())
 
         self.assertEqual(validate_uploaded_model(cast(ModuleType, task), payload, artifacts.sign(payload), []), 0)
-
-    def test_enum_filter_capitalizes_internal_values(self) -> None:
-        self.assertEqual(display_enum("binary_classification"), "Binary Classification")
 
 
 if __name__ == "__main__":

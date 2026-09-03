@@ -12,7 +12,7 @@
 
   <section class="api-docs">
     <h2>Model protocol</h2>
-    <p>An upload is a cloudpickled Python object. It must implement one prediction method: <code>predict_one(features)</code>; for Binary Classification, <code>predict_proba_one(features)</code> may instead return class-to-probability mappings; for Anomaly Detection, <code>score_one(features)</code> is also accepted. A task-specific model may implement <code>predict_event(event_id, features)</code> when it needs an event ID.</p>
+    <p>An upload is a cloudpickled Python object. It must implement one prediction method: <code>predict_one(features)</code>; for binary classification, <code>predict_proba_one(features)</code> may instead return class-to-probability mappings; for anomaly detection, <code>score_one(features)</code> is also accepted. A task-specific model may implement <code>predict_event(event_id, features)</code> when it needs an event ID.</p>
     <p><code>learn_one(features, y)</code> is optional. Everbench calls it after the corresponding label becomes available. Before registration, Everbench deep-copies the upload and exercises prediction and learning against up to five recent labelled examples.</p>
     <pre><code>class Model:
     def predict_one(self, features: dict[str, float]) -> float:
