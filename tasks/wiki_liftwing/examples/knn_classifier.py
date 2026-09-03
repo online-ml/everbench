@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 from math import log1p
+from pathlib import Path
 from typing import Any
 
+import cloudpickle
 from river import neighbors
 
 
@@ -45,3 +48,15 @@ class WikiKNNClassifier:
     def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
         del event_id
         self.model.learn_one(self.transform(event), bool(label))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path("wiki-knn-classifier.pkl"))
+    args = parser.parse_args()
+    args.output.write_bytes(cloudpickle.dumps(WikiKNNClassifier()))
+    print(args.output)
+
+
+if __name__ == "__main__":
+    main()
