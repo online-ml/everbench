@@ -32,8 +32,8 @@ function sortTable(table) {
     const leftValue = left.cells[state.column].dataset.sortValue ?? left.cells[state.column].textContent.trim();
     const rightValue = right.cells[state.column].dataset.sortValue ?? right.cells[state.column].textContent.trim();
     if (state.type === 'text') return leftValue.localeCompare(rightValue) * state.direction;
-    const leftNumber = state.type === 'date' ? Date.parse(leftValue) : Number(leftValue);
-    const rightNumber = state.type === 'date' ? Date.parse(rightValue) : Number(rightValue);
+    const leftNumber = state.type === 'date' ? Date.parse(leftValue) : leftValue === '' ? NaN : Number(leftValue);
+    const rightNumber = state.type === 'date' ? Date.parse(rightValue) : rightValue === '' ? NaN : Number(rightValue);
     if (!Number.isFinite(leftNumber) && !Number.isFinite(rightNumber)) return 0;
     if (!Number.isFinite(leftNumber)) return 1;
     if (!Number.isFinite(rightNumber)) return -1;
@@ -47,7 +47,19 @@ function sortTable(table) {
 }
 
 function restoreSorting(root = document) {
-  root.querySelectorAll('[data-sortable]').forEach(sortTable);
+  root.querySelectorAll('[data-sortable]').forEach(table => {
+    if (!sortStates.has(table.dataset.sortTable)) {
+      const control = table.querySelector('[data-sort-default-direction]');
+      if (control) {
+        sortStates.set(table.dataset.sortTable, {
+          column: control.closest('th').cellIndex,
+          type: control.dataset.sortType,
+          direction: control.dataset.sortDefaultDirection === 'ascending' ? 1 : -1,
+        });
+      }
+    }
+    sortTable(table);
+  });
 }
 
 document.body.addEventListener('htmx:afterSwap', event => {
@@ -108,6 +120,7 @@ document.addEventListener('click', async event => {
 });
 
 updateRelativeTimes();
+restoreSorting();
 setInterval(() => {
   updateAge();
   updateRelativeTimes();

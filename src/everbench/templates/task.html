@@ -15,7 +15,7 @@
     {% if archives %}
       <ul class="archive-list">
         {% for archive in archives %}
-          <li><a href="{{ url_for('download_archive', task_name=task_name, content_sha256=archive.content_sha256) }}">week of {{ archive.event_date.isoformat() }} · {{ archive.row_count|number }} records · {{ archive.byte_size|file_size if archive.byte_size is not none else archive.path|file_size }}</a></li>
+          <li><a href="{{ url_for('download_archive', task_name=task_name, content_sha256=archive.content_sha256) }}">{{ archive_download_name(task_name, archive) }} · {{ archive.row_count|number }} records · {{ archive.byte_size|file_size if archive.byte_size is not none else archive.path|file_size }}</a></li>
         {% endfor %}
       </ul>
     {% else %}

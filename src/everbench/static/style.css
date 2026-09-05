@@ -33,6 +33,8 @@ th, td { padding: 8px; text-align: left; vertical-align: top; }
 .leaderboard tbody tr:nth-child(even) td:first-child { background: #fff; }
 th { font-weight: 700; }
 .leaderboard td.number { text-align: right; }
+.metric-medal { display: inline-block; min-width: 1.4em; text-align: center; }
+.metric-missing { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .sort-control { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; text-align: left; }
 .sort-control[data-sort-direction="ascending"]::after { content: " ↑"; }
 .sort-control[data-sort-direction="descending"]::after { content: " ↓"; }

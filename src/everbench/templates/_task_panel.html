@@ -24,7 +24,7 @@
           <th><button class="sort-control" type="button" data-sort-type="number">failures</button></th>
           <th><button class="sort-control" type="button" data-sort-type="number">skipped</button></th>
           <th><button class="sort-control" type="button" data-sort-type="number">memory</button></th>
-          {% for metric_name in metric_names %}<th><button class="sort-control" type="button" data-sort-type="number">{{ metric_name }}</button></th>{% endfor %}
+          {% for metric in leaderboard_metrics %}<th><button class="sort-control" type="button" data-sort-type="number"{% if loop.first %} data-sort-default-direction="{{ 'descending' if metric.bigger_is_better else 'ascending' }}"{% endif %}>{{ metric.name }}</button></th>{% endfor %}
         </tr>
       </thead>
       <tbody>
@@ -45,7 +45,7 @@
             <td class="number" data-sort-value="{{ row.error_count }}">{{ row.error_count|number }}</td>
             <td class="number" data-sort-value="{{ row.skipped }}">{{ row.skipped|number }}</td>
             <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
-            {% for metric_name in metric_names %}<td class="number" data-sort-value="{{ row.metrics.get(metric_name, '') }}">{{ "%.3f"|format(row.metrics.get(metric_name)) if row.metrics.get(metric_name) is not none else "—" }}</td>{% endfor %}
+            {% for metric in leaderboard_metrics %}{% set score = row.metrics.get(metric.name) %}{% set medal = row.metric_medals.get(metric.name) %}<td class="number" data-sort-value="{{ score if score is not none else '' }}">{% if score is not none %}{% if medal %}<span class="metric-medal" role="img" aria-label="{{ medal.label }}">{{ medal.emoji }}</span> {% endif %}{{ "%.3f"|format(score) }}{% else %}<span class="metric-missing" tabindex="0" title="{% if row.labels == 0 %}No score yet because this model has no evaluated labels.{% else %}No finite score yet because this metric needs more suitable labels.{% endif %}" aria-label="Score unavailable">Ø</span>{% endif %}</td>{% endfor %}
           </tr>
         {% endfor %}
       </tbody>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -53,6 +54,10 @@ def format_time_until(value: datetime) -> str:
 
 def format_time_since(value: datetime) -> str:
     return f"{format_duration((datetime.now(UTC) - value).total_seconds())} ago"
+
+
+def archive_download_name(task_name: str, manifest: Any) -> str:
+    return f"{task_name}-{manifest.event_date.isoformat()}-{manifest.content_sha256[:12]}.parquet"
 
 
 @lru_cache
@@ -142,6 +147,62 @@ def task_source_url(task) -> str:
     return f"https://github.com/online-ml/everbench/blob/main/{relative_path}"
 
 
+MEDALS = (
+    {"emoji": "🥇", "label": "gold medal"},
+    {"emoji": "🥈", "label": "silver medal"},
+    {"emoji": "🥉", "label": "bronze medal"},
+)
+
+
+def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, ...]) -> dict[str, Any]:
+    """Add metric placements and apply the task's natural default ordering."""
+    metrics = [
+        {
+            "name": type(metric).__name__,
+            "bigger_is_better": bool(metric.bigger_is_better),
+        }
+        for metric in configured_metrics
+    ]
+    leaderboard = [{**row, "metric_medals": {}} for row in rows]
+
+    for metric in metrics:
+        scores = []
+        for index, row in enumerate(leaderboard):
+            value = row["metrics"].get(metric["name"])
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score):
+                scores.append((index, score))
+
+        scores.sort(key=lambda item: item[1], reverse=metric["bigger_is_better"])
+        previous_score = None
+        rank = 0
+        for position, (index, score) in enumerate(scores):
+            if previous_score is None or score != previous_score:
+                rank = position
+                previous_score = score
+            if rank >= len(MEDALS):
+                break
+            leaderboard[index]["metric_medals"][metric["name"]] = MEDALS[rank]
+
+    first_metric = metrics[0]
+
+    def first_metric_sort_key(row: dict[str, Any]) -> tuple[bool, float]:
+        value = row["metrics"].get(first_metric["name"])
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return True, 0
+        if not math.isfinite(score):
+            return True, 0
+        return False, -score if first_metric["bigger_is_better"] else score
+
+    leaderboard.sort(key=first_metric_sort_key)
+    return {"leaderboard": leaderboard, "leaderboard_metrics": metrics}
+
+
 def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
     task_name = task.TASK_NAME
     heartbeats = [heartbeat for heartbeat in reporting.worker_health(session) if heartbeat.task_name == task_name]
@@ -154,10 +215,10 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
             hot_store = candidate if isinstance(candidate, dict) else None
         except ValueError:
             hot_store = None
+    leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
     return {
         "stats": reporting.task_stats(session, task_name),
-        "leaderboard": reporting.task_leaderboard(session, task_name),
-        "metric_names": metric_definition(task.PROBLEM_TYPE, task.METRICS)["metric_names"],
+        **leaderboard,
         "hot_store": hot_store,
     }
 
@@ -189,6 +250,7 @@ def create_app(
     app.add_template_filter(format_file_size, "file_size")
     app.add_template_filter(format_time_since, "time_since")
     app.add_template_filter(format_time_until, "time_until")
+    app.add_template_global(archive_download_name)
 
     @app.get("/")
     def dashboard() -> str:
@@ -234,7 +296,7 @@ def create_app(
         manifest = archive_store.task_archive(_session(), task_name, content_sha256)
         if manifest is None:
             abort(404)
-        filename = f"{task_name}-{manifest.event_date.isoformat()}-{content_sha256[:12]}.parquet"
+        filename = archive_download_name(task_name, manifest)
         if not manifest.path.startswith("s3://"):
             return send_file(manifest.path, as_attachment=True, download_name=filename)
         response = Response(
