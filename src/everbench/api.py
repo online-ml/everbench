@@ -169,6 +169,8 @@ def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, 
         scores = []
         for index, row in enumerate(leaderboard):
             value = row["metrics"].get(metric["name"])
+            if value is None:
+                continue
             try:
                 score = float(value)
             except (TypeError, ValueError):
