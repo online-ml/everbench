@@ -13,8 +13,8 @@ from everbench.auto.research import (
     ConstraintResult,
     Evaluation,
     MetricConstraint,
-    Observation,
     Objective,
+    Observation,
     ResearchSnapshot,
 )
 

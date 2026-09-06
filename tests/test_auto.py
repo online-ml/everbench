@@ -165,9 +165,7 @@ def test_objective_uses_the_metric_direction_and_rejects_non_finite_scores() -> 
     minimize = Objective(metrics.LogLoss(), min_improvement=0.05)
     assert minimize.accepts(Evaluation(champion_score=0.5, candidate_score=0.4, observations=1))
     assert not minimize.accepts(Evaluation(champion_score=0.5, candidate_score=0.46, observations=1))
-    assert not Objective(metrics.LogLoss()).accepts(
-        Evaluation(champion_score=0.5, candidate_score=0.5, observations=1)
-    )
+    assert not Objective(metrics.LogLoss()).accepts(Evaluation(champion_score=0.5, candidate_score=0.5, observations=1))
     assert not minimize.accepts(Evaluation(champion_score=float("nan"), candidate_score=0.4, observations=1))
 
     maximize = Objective(metrics.Accuracy(), min_improvement=0.05)

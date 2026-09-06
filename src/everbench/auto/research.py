@@ -61,11 +61,7 @@ class MetricConstraint:
             regression = champion_score - candidate_score
         else:
             regression = candidate_score - champion_score
-        passed = (
-            math.isfinite(champion_score)
-            and math.isfinite(candidate_score)
-            and regression <= self.max_regression
-        )
+        passed = math.isfinite(champion_score) and math.isfinite(candidate_score) and regression <= self.max_regression
         return ConstraintResult(
             name=self.name,
             passed=passed,
@@ -130,9 +126,7 @@ class Objective:
         if len(set(names)) != len(names):
             return False
         results = {result.name: result.passed for result in evaluation.constraints}
-        names_to_require = self.required_constraints + tuple(
-            constraint.name for constraint in self.metric_constraints
-        )
+        names_to_require = self.required_constraints + tuple(constraint.name for constraint in self.metric_constraints)
         return all(results.get(name, False) for name in names_to_require)
 
 

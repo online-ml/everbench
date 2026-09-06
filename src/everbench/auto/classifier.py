@@ -55,9 +55,7 @@ class AutoClassifier(base.Classifier):
         self.model = model
         self._objective = objective.copy()
         self.history_capacity = history_capacity
-        self._history: deque[Observation] | None = (
-            deque(maxlen=history_capacity) if history_capacity else None
-        )
+        self._history: deque[Observation] | None = deque(maxlen=history_capacity) if history_capacity else None
         self._context = copy.deepcopy(context)
         self._metric = self._objective.fresh_metric()
         self._generation = 0
@@ -138,10 +136,7 @@ class AutoClassifier(base.Classifier):
             raise ValueError(
                 f"{type(self._objective.metric).__name__} does not work with {type(candidate.model).__name__}"
             )
-        if any(
-            not constraint.metric.works_with(candidate.model)
-            for constraint in self._objective.metric_constraints
-        ):
+        if any(not constraint.metric.works_with(candidate.model) for constraint in self._objective.metric_constraints):
             raise ValueError(f"secondary metric does not work with {type(candidate.model).__name__}")
         if not self._objective.accepts(evaluation):
             return False

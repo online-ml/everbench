@@ -25,9 +25,7 @@ class EverbenchAutoClassifier:
         del event_id
         return self.auto_classifier.predict_one(event)
 
-    def predict_proba_one(
-        self, event_id: str, event: dict[str, Any]
-    ) -> dict[base.typing.ClfTarget, float]:
+    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[base.typing.ClfTarget, float]:
         del event_id
         return self.auto_classifier.predict_proba_one(event)
 

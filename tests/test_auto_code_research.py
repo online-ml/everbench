@@ -181,17 +181,13 @@ def test_code_researcher_prefers_a_constraint_passing_candidate() -> None:
             type="function_call",
             name="evaluate_candidate",
             call_id="fast",
-            arguments=__import__("json").dumps(
-                {"source": ENSEMBLE_SOURCE, "hypothesis": "faster primary gain"}
-            ),
+            arguments=__import__("json").dumps({"source": ENSEMBLE_SOURCE, "hypothesis": "faster primary gain"}),
         ),
         SimpleNamespace(
             type="function_call",
             name="evaluate_candidate",
             call_id="safe",
-            arguments=__import__("json").dumps(
-                {"source": STACKING_SOURCE, "hypothesis": "respect the guard"}
-            ),
+            arguments=__import__("json").dumps({"source": STACKING_SOURCE, "hypothesis": "respect the guard"}),
         ),
         SimpleNamespace(type="function_call", name="finish", call_id="finish", arguments="{}"),
     ]

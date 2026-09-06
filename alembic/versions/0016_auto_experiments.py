@@ -36,9 +36,7 @@ def upgrade() -> None:
         sa.Column("error", sa.Text()),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True)),
-        sa.CheckConstraint(
-            "status IN ('running', 'rejected', 'promoted', 'failed')", name="auto_experiment_status"
-        ),
+        sa.CheckConstraint("status IN ('running', 'rejected', 'promoted', 'failed')", name="auto_experiment_status"),
         sa.ForeignKeyConstraint(
             ["task_name", "model_id"],
             ["benchmark_models.task_name", "benchmark_models.model_id"],
@@ -54,9 +52,7 @@ def upgrade() -> None:
             name="auto_experiments_promotion_cohort_key",
         ),
     )
-    op.create_index(
-        "auto_experiments_latest_idx", "auto_experiments", ["task_name", "model_id", "started_at"]
-    )
+    op.create_index("auto_experiments_latest_idx", "auto_experiments", ["task_name", "model_id", "started_at"])
 
 
 def downgrade() -> None:

@@ -98,9 +98,7 @@ def evaluate_temporally(
     if len(set(ids)) != len(ids):
         raise ValueError("observation IDs must be unique")
 
-    metric_definitions = (objective.metric,) + tuple(
-        constraint.metric for constraint in objective.metric_constraints
-    )
+    metric_definitions = (objective.metric,) + tuple(constraint.metric for constraint in objective.metric_constraints)
     champion_metrics = [metric.clone() for metric in metric_definitions]
     candidate_metrics = [metric.clone() for metric in metric_definitions]
     predictions: dict[str, tuple[list[Any], list[Any]]] = {}

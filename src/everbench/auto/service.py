@@ -97,9 +97,7 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
         if existing is not None:
             auto_classifier, _ = _load_auto(session, existing)
             return AutoRunReport(task.TASK_NAME, config.model_id, None, "existing", auto_classifier.generation)
-        observations = complete_observations(
-            session, task, config.history_limit, config.maturity_margin_seconds
-        )
+        observations = complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
     if len(observations) < config.min_research_observations + config.promotion_observations:
         required = config.min_research_observations + config.promotion_observations
         raise ValueError(f"bootstrap needs at least {required:,} mature observations; received {len(observations):,}")
@@ -137,9 +135,7 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
                 "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
             },
         )
-        model_store.register_model(
-            session, task.TASK_NAME, config.model_id, config.owner, artifact_record.artifact_id
-        )
+        model_store.register_model(session, task.TASK_NAME, config.model_id, config.owner, artifact_record.artifact_id)
         model_store.save_pickle_snapshot(
             session,
             task.TASK_NAME,
@@ -187,8 +183,7 @@ def _evaluation(outcome: Any, config: AutoResearchConfig) -> dict[str, Any]:
         "improvement": improvement,
         "observations": evaluation.observations,
         "constraints": [
-            {"name": item.name, "passed": item.passed, "detail": item.detail}
-            for item in evaluation.constraints
+            {"name": item.name, "passed": item.passed, "detail": item.detail} for item in evaluation.constraints
         ],
         "timing_seconds": {
             "champion_predict": outcome.champion_predict_seconds,
@@ -214,9 +209,7 @@ def _reflect_once(
         registration_artifact_id = registration.artifact_id
         if registration_artifact_id is None:
             raise RuntimeError(f"auto model registration artifact missing for {config.model_id}")
-        observations = complete_observations(
-            session, task, config.history_limit, config.maturity_margin_seconds
-        )
+        observations = complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
         recent = store.recent_experiments(session, task.TASK_NAME, config.model_id)
         manifests = archive_store.task_archives(session, task.TASK_NAME) if config.retain_raw_examples else []
     split = temporal_split(observations, config.promotion_observations, config.min_research_observations)

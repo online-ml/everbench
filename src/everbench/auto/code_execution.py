@@ -71,7 +71,9 @@ def validate_candidate_source(source: str, max_bytes: int) -> None:
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             raise ValueError(f"candidate dunder access is not allowed: {node.attr}")
     builders = [
-        node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "build_model"
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "build_model"
     ]
     if len(builders) != 1 or isinstance(builders[0], ast.AsyncFunctionDef):
         raise ValueError("candidate source must define exactly one synchronous build_model()")
@@ -133,9 +135,7 @@ def build_candidate_model(
     max_output_bytes: int,
 ) -> Any:
     validate_candidate_source(source, max_source_bytes)
-    model = _run_runtime(
-        {"operation": "build", "source": source}, timeout_seconds, max_output_bytes
-    )
+    model = _run_runtime({"operation": "build", "source": source}, timeout_seconds, max_output_bytes)
     if not callable(getattr(model, "learn_one", None)) or not (
         callable(getattr(model, "predict_one", None)) or callable(getattr(model, "predict_proba_one", None))
     ):
