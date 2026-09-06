@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Identity,
     Index,
@@ -175,6 +176,50 @@ class ModelSnapshot(Base):
     checkpoint_label_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     checkpoint_event_sequence: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AutoExperiment(Base):
+    """Durable audit record for one autonomous reflection."""
+
+    __tablename__ = "auto_experiments"
+    __table_args__ = (
+        CheckConstraint("status IN ('running', 'rejected', 'promoted', 'failed')", name="auto_experiment_status"),
+        ForeignKeyConstraint(
+            ["task_name", "model_id"],
+            ["benchmark_models.task_name", "benchmark_models.model_id"],
+            ondelete="CASCADE",
+        ),
+        Index("auto_experiments_latest_idx", "task_name", "model_id", "started_at"),
+        UniqueConstraint(
+            "task_name",
+            "model_id",
+            "promotion_start_sequence",
+            "promotion_end_sequence",
+            name="auto_experiments_promotion_cohort_key",
+        ),
+    )
+
+    experiment_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_name: Mapped[str] = mapped_column(String, nullable=False)
+    model_id: Mapped[str] = mapped_column(String, nullable=False)
+    parent_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    researcher: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    proposal: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+    research_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+    promotion_start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    promotion_end_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    champion_artifact_id: Mapped[str] = mapped_column(
+        String, ForeignKey("model_artifacts.artifact_id", ondelete="RESTRICT"), nullable=False
+    )
+    candidate_artifact_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("model_artifacts.artifact_id", ondelete="RESTRICT")
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ArchiveManifest(Base):

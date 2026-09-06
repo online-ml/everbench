@@ -14,8 +14,11 @@ case "${EVERBENCH_SERVICE_ROLE:-web}" in
     worker)
         exec uv run everbench worker-all
         ;;
+    researcher)
+        exec uv run everbench auto-worker-all
+        ;;
     *)
-        echo "EVERBENCH_SERVICE_ROLE must be 'web' or 'worker'" >&2
+        echo "EVERBENCH_SERVICE_ROLE must be 'web', 'worker', or 'researcher'" >&2
         exit 2
         ;;
 esac

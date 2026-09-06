@@ -9,7 +9,10 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Event
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from everbench.auto.config import AutoResearchConfig
 
 from everbench.metrics import metric_definition
 
@@ -34,6 +37,7 @@ class TaskDefinition:
     event_timestamp: Callable[[dict[str, Any]], float] | None = None
     label_timestamp: Callable[[dict[str, Any]], float] | None = None
     metric_inputs_for: Callable[[Any, Any, Any], tuple[Any, Any]] | None = None
+    AUTO_RESEARCH: AutoResearchConfig | None = None
 
 
 def task_paths(directory: str | Path) -> list[Path]:
@@ -118,6 +122,7 @@ def _load_task(task_path: Path) -> TaskDefinition:
         event_timestamp=_optional_callable(module, "event_timestamp"),
         label_timestamp=_optional_callable(module, "label_timestamp"),
         metric_inputs_for=_optional_callable(module, "metric_inputs_for"),
+        AUTO_RESEARCH=getattr(module, "AUTO_RESEARCH", None),
     )
 
 

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from everbench import artifacts, event_store
 from everbench.db import advisory_key
 from everbench.schema import (
+    AutoExperiment,
     BenchmarkEvent,
     MetricState,
     ModelArtifact,
@@ -150,11 +151,17 @@ def _delete_unreferenced_artifacts(session: Session, artifact_ids: set[str]) -> 
         return
     registered_ids = select(ModelRegistration.artifact_id).where(ModelRegistration.artifact_id.is_not(None))
     snapshot_ids = select(ModelSnapshot.artifact_id)
+    experiment_ids = select(AutoExperiment.candidate_artifact_id).where(
+        AutoExperiment.candidate_artifact_id.is_not(None)
+    )
+    champion_ids = select(AutoExperiment.champion_artifact_id)
     session.execute(
         delete(ModelArtifact).where(
             ModelArtifact.artifact_id.in_(artifact_ids),
             ModelArtifact.artifact_id.not_in(registered_ids),
             ModelArtifact.artifact_id.not_in(snapshot_ids),
+            ModelArtifact.artifact_id.not_in(experiment_ids),
+            ModelArtifact.artifact_id.not_in(champion_ids),
         )
     )
 
@@ -169,9 +176,18 @@ def delete_model(session: Session, task_name: str, model_id: str) -> bool:
             ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id
         )
     )
+    experiment_artifact_ids = session.execute(
+        select(AutoExperiment.champion_artifact_id, AutoExperiment.candidate_artifact_id).where(
+            AutoExperiment.task_name == task_name,
+            AutoExperiment.model_id == model_id,
+        )
+    ).all()
     for model_table in (MetricState, ModelSnapshot):
         session.execute(delete(model_table).where(model_table.task_name == task_name, model_table.model_id == model_id))
     artifact_ids = {artifact_id for artifact_id in (registration.artifact_id, snapshot_artifact_id) if artifact_id}
+    artifact_ids.update(
+        artifact_id for pair in experiment_artifact_ids for artifact_id in pair if artifact_id is not None
+    )
     session.delete(registration)
     session.flush()
     _delete_unreferenced_artifacts(session, artifact_ids)

@@ -11,6 +11,7 @@ dependencies = [
     "gunicorn>=23,<24",
     "httpx>=0.28,<1",
     "httpx-sse>=0.4,<0.5",
+    "openai>=3.7.0,<4.0.0",
     "psycopg[binary]>=3.2,<4",
     "pyarrow>=18,<20",
     "python-dotenv>=1.0,<2",
@@ -33,7 +34,6 @@ dev = [
     "ty>=0.0.77",
 ]
 upload-models = [
-    "openai>=3.7.0,<4.0.0",
     "scikit-learn>=1.9.0,<2.0.0",
     "vowpalwabbit>=9.11.2,<10.0.0",
 ]

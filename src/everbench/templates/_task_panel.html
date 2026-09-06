@@ -12,6 +12,34 @@
     </dl>
   </section>
 
+  {% if auto_research %}
+  <section>
+    <h2>Autonomous research</h2>
+    <p class="muted">Stable model: <code>{{ auto_research.model_id }}</code>. Candidate code is promoted only on fresh sealed evidence.</p>
+    {% if auto_research.experiments %}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>started</th><th>generation</th><th>status</th><th>candidate score</th><th>improvement</th><th>hypothesis</th></tr></thead>
+        <tbody>
+        {% for experiment in auto_research.experiments %}{% set evaluation = experiment.evaluation or {} %}
+          <tr>
+            <td>{{ experiment.started_at|time_since }}</td>
+            <td class="number">{{ experiment.parent_generation }}</td>
+            <td>{{ experiment.status }}</td>
+            <td class="number">{% if evaluation.get("candidate_score") is not none %}{{ "%.6f"|format(evaluation.candidate_score) }}{% else %}—{% endif %}</td>
+            <td class="number">{% if evaluation.get("improvement") is not none %}{{ "%+.6f"|format(evaluation.improvement) }}{% else %}—{% endif %}</td>
+            <td>{{ experiment.hypothesis or experiment.error or "—" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">No reflections have completed yet.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section>
     <h2>Leaderboard</h2>
     <div class="table-scroll" {% if not leaderboard %}hidden{% endif %}>

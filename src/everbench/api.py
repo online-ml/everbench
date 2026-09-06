@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.http import dump_options_header
 
 from everbench import archive, archive_store, artifacts, event_store, model_store, reporting
+from everbench.auto import store as auto_store
 from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
@@ -218,10 +219,17 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
         except ValueError:
             hot_store = None
     leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
+    auto_research = None
+    if task.AUTO_RESEARCH is not None:
+        auto_research = {
+            "model_id": task.AUTO_RESEARCH.model_id,
+            "experiments": auto_store.recent_experiments(session, task_name, task.AUTO_RESEARCH.model_id, limit=5),
+        }
     return {
         "stats": reporting.task_stats(session, task_name),
         **leaderboard,
         "hot_store": hot_store,
+        "auto_research": auto_research,
     }
 
 
