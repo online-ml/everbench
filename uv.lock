@@ -128,6 +128,7 @@ dependencies = [
     { name = "gunicorn" },
     { name = "httpx" },
     { name = "httpx-sse" },
+    { name = "openai" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
     { name = "python-dotenv" },
@@ -143,7 +144,6 @@ dev = [
     { name = "ty" },
 ]
 upload-models = [
-    { name = "openai" },
     { name = "scikit-learn" },
     { name = "vowpalwabbit" },
 ]
@@ -158,6 +158,7 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=23,<24" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "httpx-sse", specifier = ">=0.4,<0.5" },
+    { name = "openai", specifier = ">=3.7.0,<4.0.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pyarrow", specifier = ">=18,<20" },
     { name = "python-dotenv", specifier = ">=1.0,<2" },
@@ -173,7 +174,6 @@ dev = [
     { name = "ty", specifier = ">=0.0.77" },
 ]
 upload-models = [
-    { name = "openai", specifier = ">=3.7.0,<4.0.0" },
     { name = "scikit-learn", specifier = ">=1.9.0,<2.0.0" },
     { name = "vowpalwabbit", specifier = ">=9.11.2,<10.0.0" },
 ]

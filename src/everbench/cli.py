@@ -62,6 +62,76 @@ def worker_all(tasks_directory: str) -> None:
     run_tasks(make_session_factory(), discover_tasks(tasks_directory))
 
 
+@main.group("auto")
+def auto() -> None:
+    """Bootstrap, inspect, and run autonomous model research."""
+
+
+@auto.command("bootstrap")
+@click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
+def auto_bootstrap(task_file: str) -> None:
+    """Register and pre-train TASK_FILE's initial auto champion."""
+    from everbench.auto.service import AutoResearchRunner
+
+    report = AutoResearchRunner(make_session_factory(), load_task(task_file)).bootstrap()
+    click.echo(f"{report.task_name}/{report.model_id}: {report.status} {report.detail}".rstrip())
+
+
+@auto.command("reflect")
+@click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
+def auto_reflect(task_file: str) -> None:
+    """Run one propose-evaluate-promote reflection for TASK_FILE."""
+    from everbench.auto.service import AutoResearchRunner
+
+    report = AutoResearchRunner(make_session_factory(), load_task(task_file)).reflect()
+    click.echo(
+        f"{report.task_name}/{report.model_id}: {report.status} generation={report.generation} "
+        f"experiment={report.experiment_id} {report.detail}".rstrip()
+    )
+
+
+@auto.command("status")
+@click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 100))
+def auto_status(task_file: str, limit: int) -> None:
+    """Show recent autonomous research experiments for TASK_FILE."""
+    from everbench.auto import store as auto_store
+
+    task = load_task(task_file)
+    config = task.AUTO_RESEARCH
+    if config is None:
+        raise click.ClickException(f"task {task.TASK_NAME!r} does not configure autonomous research")
+    with make_session_factory()() as session:
+        rows = auto_store.recent_experiments(session, task.TASK_NAME, config.model_id, limit)
+    if not rows:
+        click.echo(f"{task.TASK_NAME}/{config.model_id}: no experiments")
+        return
+    for row in rows:
+        evaluation = row.evaluation or {}
+        score = evaluation.get("candidate_score")
+        improvement = evaluation.get("improvement")
+        score_text = f" score={score:.6f} improvement={improvement:.6f}" if score is not None else ""
+        click.echo(
+            f"{row.started_at.isoformat()} generation={row.parent_generation} status={row.status}"
+            f"{score_text} {row.hypothesis or row.error or ''}".rstrip()
+        )
+
+
+@main.command("auto-worker-all")
+@click.option(
+    "--tasks-directory",
+    default="tasks",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+)
+@click.option("--once", is_flag=True, help="Run one research cycle per configured task, then exit.")
+def auto_worker_all(tasks_directory: str, once: bool) -> None:
+    """Run autonomous research for every task that opts in."""
+    from everbench.auto.service import auto_worker
+
+    auto_worker(make_session_factory(), discover_tasks(tasks_directory), once=once)
+
+
 @main.command()
 def migrate() -> None:
     """Upgrade Postgres schema while holding the deployment-wide migration lock."""

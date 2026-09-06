@@ -8,8 +8,12 @@ Run it through the generic harness:
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from river import metrics
+
+from everbench.auto.config import AutoResearchConfig
+from everbench.auto.research import MetricConstraint, Objective
 
 TASK_NAME = "wiki-liftwing"
 DESCRIPTION_HTML = """
@@ -21,6 +25,36 @@ EVENT_STREAM_URL = "https://stream.wikimedia.org/v2/stream/recentchange"
 LABEL_STREAM_URL = "https://stream.wikimedia.org/v2/stream/mediawiki.revision-tags-change"
 WIKI = "enwiki"
 NEGATIVE_LABEL_DELAY_SECONDS = 48 * 60 * 60
+
+AUTO_RESEARCH = AutoResearchConfig(
+    model_id="auto-river",
+    owner="everbench-auto",
+    candidate_path=Path(__file__).with_name("auto") / "candidate.py",
+    objective=Objective(
+        metrics.ROCAUC(),
+        min_improvement=0.002,
+        min_observations=10_000,
+        required_constraints=("prediction_time_ratio",),
+        metric_constraints=(MetricConstraint("log_loss_non_regression", metrics.LogLoss(), 0.01),),
+    ),
+    context={
+        "problem_description": (
+            "Predict whether an English Wikipedia main-namespace edit receives the mw-reverted tag within 48 hours."
+        ),
+        "primary_metric": "ROCAUC (higher is better)",
+        "notes": [
+            "Positive labels are delayed and negatives mature after 48 hours.",
+            "The model receives the complete raw Wikimedia recent-change event mapping.",
+            "Logged-out editors may use temporary account names beginning with a tilde.",
+        ],
+    },
+    # The stream currently produces roughly 4,500 eligible edits/hour. A
+    # 50,000-row default would cover only about 12 hours and could never expose
+    # delayed feedback to a fresh model before promotion predictions begin.
+    history_limit=300_000,
+    min_research_span_seconds=48 * 60 * 60,
+    retain_raw_examples=True,
+)
 
 
 def event_id(event: dict) -> str | None:
