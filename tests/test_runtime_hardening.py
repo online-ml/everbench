@@ -76,8 +76,9 @@ def test_model_load_uses_the_task_name_for_snapshots(signing_key: None, monkeypa
     assert model.predict_one("event", {}) == 0.5
 
 
-def test_task_source_url_links_to_the_checked_in_definition() -> None:
+def test_task_source_url_links_to_the_checked_in_definition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     task = SimpleNamespace(__file__=Path("tasks/dummy/task.py").resolve())
+    monkeypatch.chdir(tmp_path)
 
     assert task_source_url(task) == "https://github.com/online-ml/everbench/blob/main/tasks/dummy/task.py"
 

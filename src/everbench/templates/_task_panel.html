@@ -1,6 +1,12 @@
 {% macro leaderboard_table(rows, table_name, show_medals) -%}
 <div class="table-scroll" {% if not rows %}hidden{% endif %}>
 <table class="leaderboard" data-sortable data-sort-table="{{ table_name }}">
+  <colgroup>
+    <col class="leaderboard-model-column">
+    <col class="leaderboard-predictions-column">
+    <col span="4" class="leaderboard-operation-column">
+    {% for metric in leaderboard_metrics %}<col class="leaderboard-metric-column">{% endfor %}
+  </colgroup>
   <thead>
     <tr>
       <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>

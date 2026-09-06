@@ -25,7 +25,10 @@ h2 { font-size: 14px; margin: 32px 0 8px; text-transform: uppercase; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px; text-align: left; vertical-align: top; }
 .table-scroll { overflow-x: auto; }
-.leaderboard { width: max-content; min-width: 100%; }
+.leaderboard { width: 100%; min-width: 900px; table-layout: fixed; }
+.leaderboard-model-column { width: 18%; }
+.leaderboard-predictions-column { width: 11%; }
+.leaderboard-operation-column { width: 9%; }
 .leaderboard th, .leaderboard td { white-space: nowrap; }
 .leaderboard th:first-child, .leaderboard td:first-child { position: sticky; left: 0; z-index: 1; }
 .leaderboard th:first-child { z-index: 2; background: #fff; }

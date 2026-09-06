@@ -141,9 +141,11 @@ def task_or_404(task_name: str):
 
 def task_source_url(task) -> str:
     """Link a checked-in task definition to its canonical GitHub source."""
-    repository_root = Path(__file__).resolve().parents[2]
     task_path = Path(task.__file__).resolve()
-    relative_path = task_path.relative_to(repository_root).as_posix()
+    tasks_root = next((parent for parent in task_path.parents if parent.name == "tasks"), None)
+    if tasks_root is None:
+        raise ValueError(f"task definition is not inside a tasks directory: {task_path}")
+    relative_path = (Path("tasks") / task_path.relative_to(tasks_root)).as_posix()
     return f"https://github.com/online-ml/everbench/blob/main/{relative_path}"
 
 

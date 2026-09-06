@@ -174,6 +174,8 @@ def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeyp
     assert 'data-model-dialog-heading="recent"' in recent_markup
     assert "metric-medal" not in recent_markup
     assert "Autonomous research" not in response.text
+    assert response.text.count('class="leaderboard-model-column"') == 2
+    assert response.text.count('class="leaderboard-predictions-column"') == 2
 
 
 def test_unknown_task_panel_is_not_found(client: FlaskClient) -> None:
