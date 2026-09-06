@@ -137,6 +137,37 @@ def test_lower_is_better_first_metric_sorts_ascending() -> None:
     assert view["leaderboard_metrics"] == [{"name": "LogLoss", "bigger_is_better": False}]
 
 
+def test_failure_icon_is_rendered_before_the_model_name(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        reporting,
+        "task_leaderboard",
+        lambda session, task_name: [
+            {
+                "model_id": "failed-model",
+                "owner": "test",
+                "active": True,
+                "failure_count": 1,
+                "last_error": "RuntimeError: failed",
+                "failed_at": datetime.now(UTC),
+                "disabled_until": datetime.now(UTC) + timedelta(minutes=1),
+                "error_count": 1,
+                "skipped": 0,
+                "created_at": datetime.now(UTC) - timedelta(days=4),
+                "predictions": 10,
+                "labels": 10,
+                "metrics": {"Accuracy": 0.5},
+                "model_bytes": 100,
+            }
+        ],
+    )
+
+    response = client.get("/tasks/dummy/panel")
+
+    model_cell = response.text.split('class="model-cell"', 1)[1].split("</td>", 1)[0]
+    assert model_cell.index('class="model-failure"') < model_cell.index('class="model-name"')
+    assert 'class="table-scroll leaderboard-scroll"' in response.text
+
+
 def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
     def row(model_id: str, score: float, created_at: datetime) -> dict:
         return {

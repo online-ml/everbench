@@ -1,5 +1,5 @@
 {% macro leaderboard_table(rows, table_name, show_medals) -%}
-<div class="table-scroll" {% if not rows %}hidden{% endif %}>
+<div class="table-scroll leaderboard-scroll" {% if not rows %}hidden{% endif %}>
 <table class="leaderboard" data-sortable data-sort-table="{{ table_name }}">
   <colgroup>
     <col class="leaderboard-model-column">
@@ -21,8 +21,7 @@
   <tbody>
     {% for row in rows %}
       <tr>
-        <td data-sort-value="{{ row.model_id }}">
-          <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
+        <td class="model-cell" data-sort-value="{{ row.model_id }}">
           {% if row.disabled_until %}
             <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
             <template>
@@ -30,6 +29,7 @@
               <pre><code>{{ row.last_error }}</code></pre>
             </template>
           {% endif %}
+          <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
         </td>
         <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
         <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
