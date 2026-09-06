@@ -34,7 +34,7 @@ th, td { padding: 8px; text-align: left; vertical-align: top; }
 th { font-weight: 700; }
 .leaderboard td.number { text-align: right; }
 .metric-medal { display: inline-block; min-width: 1.4em; text-align: center; }
-.metric-missing { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
+.metric-missing { position: relative; cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .sort-control { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; text-align: left; }
 .sort-control[data-sort-direction="ascending"]::after { content: " ↑"; }
 .sort-control[data-sort-direction="descending"]::after { content: " ↓"; }
@@ -53,11 +53,12 @@ tbody tr:nth-child(odd) { background: #f3f3f3; }
 .dialog-close { width: 26px; height: 26px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 20px; line-height: 1; }
 .info { position: relative; display: inline-block; width: 15px; height: 15px; cursor: help; vertical-align: -2px; }
 .info::before { display: block; width: 100%; height: 100%; background: #777; content: ""; -webkit-mask: url("circle-help.svg") center / contain no-repeat; mask: url("circle-help.svg") center / contain no-repeat; }
-.info::after { position: absolute; z-index: 1; bottom: calc(100% + 7px); left: 50%; width: max-content; max-width: 260px; padding: 7px 9px; transform: translateX(-50%); background: #111; color: #fff; content: attr(data-tooltip); font-size: 12px; font-weight: 400; line-height: 1.35; opacity: 0; pointer-events: none; text-transform: none; transition: opacity 100ms ease; visibility: hidden; white-space: normal; }
+.info::after, .metric-missing::after { position: absolute; z-index: 3; bottom: calc(100% + 7px); left: 50%; width: max-content; max-width: 260px; padding: 7px 9px; transform: translateX(-50%); background: #111; color: #fff; content: attr(data-tooltip); font-size: 12px; font-weight: 400; line-height: 1.35; opacity: 0; pointer-events: none; text-align: left; text-transform: none; transition: opacity 100ms ease; visibility: hidden; white-space: normal; }
+.metric-missing::after { right: 0; left: auto; transform: none; }
 .info:hover::before, .info:focus::before { background: #111; }
 .info:focus { outline: none; }
 .info:focus-visible { outline: 1px solid #111; outline-offset: 2px; }
-.info:hover::after, .info:focus::after { opacity: 1; visibility: visible; }
+.info:hover::after, .info:focus::after, .metric-missing:hover::after, .metric-missing:focus::after { opacity: 1; visibility: visible; }
 .archive-list { margin: 0; padding-left: 20px; }
 .archive-list li { margin: 6px 0; }
 .api-list { margin: 0; }

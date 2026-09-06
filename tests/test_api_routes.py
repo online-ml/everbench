@@ -118,8 +118,8 @@ def test_leaderboard_medals_and_default_metric_order(client: FlaskClient, monkey
     assert '<span class="metric-medal" role="img" aria-label="bronze medal">🥉</span> 0.700' in response.text
     assert '<span class="metric-medal" role="img" aria-label="gold medal">🥇</span> 0.050' in response.text
     assert (
-        'title="No finite score yet because this metric needs more suitable labels." aria-label="Score unavailable">Ø'
-        in response.text
+        'data-tooltip="No finite score yet because this metric needs more suitable labels." '
+        'aria-label="No finite score yet because this metric needs more suitable labels.">Ø' in response.text
     )
 
 

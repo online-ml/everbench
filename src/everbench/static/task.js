@@ -72,6 +72,18 @@ document.body.addEventListener('htmx:afterSwap', event => {
 });
 
 document.addEventListener('click', async event => {
+  if (event.target instanceof HTMLDialogElement && event.target.open) {
+    const bounds = event.target.getBoundingClientRect();
+    const clickedOutside = event.clientX < bounds.left
+      || event.clientX > bounds.right
+      || event.clientY < bounds.top
+      || event.clientY > bounds.bottom;
+    if (clickedOutside) {
+      event.target.close();
+      return;
+    }
+  }
+
   const sortControl = event.target.closest('[data-sort-type]');
   if (sortControl) {
     const table = sortControl.closest('[data-sortable]');
