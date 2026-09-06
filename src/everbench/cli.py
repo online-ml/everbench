@@ -136,14 +136,19 @@ def auto_worker_all(tasks_directory: str, once: bool) -> None:
 @main.command()
 def migrate() -> None:
     """Upgrade Postgres schema while holding the deployment-wide migration lock."""
-    root = Path(__file__).resolve().parents[2]
+    # The production package is installed non-editably in site-packages, while
+    # Alembic's configuration and revisions remain in Railway's /app checkout.
+    root = Path.cwd()
+    alembic_config = root / "alembic.ini"
+    if not alembic_config.is_file():
+        raise click.ClickException(f"alembic.ini not found in project directory: {root}")
     engine = make_engine()
     try:
         with engine.connect() as connection:
             lock_id = advisory_key("migrations")
             connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": lock_id})
             try:
-                command.upgrade(AlembicConfig(str(root / "alembic.ini")), "head")
+                command.upgrade(AlembicConfig(str(alembic_config)), "head")
             finally:
                 connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
     finally:
