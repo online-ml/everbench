@@ -196,6 +196,26 @@ def test_deleted_model_ids_start_fresh_registrations(sessions: sessionmaker[Sess
         assert registration.model_id == "original"
 
 
+def test_model_detail_uses_autonomous_candidate_source(sessions: sessionmaker[Session]) -> None:
+    task_name = f"auto-source-test-{uuid4()}"
+    source = "def build_model():\n    return None\n"
+    with sessions.begin() as session:
+        payload = artifacts.dumps(WorkingModel())
+        artifact = model_store.store_artifact(
+            session,
+            payload,
+            artifacts.sign(payload),
+            {"source_code": source},
+        )
+        model_store.register_model(session, task_name, "auto", "test", artifact.artifact_id)
+
+    with sessions() as session:
+        detail = reporting.model_detail(session, task_name, "auto")
+
+    assert detail is not None
+    assert detail["class_definition"] == source
+
+
 def test_event_completion_requires_a_model_checkpoint(sessions: sessionmaker[Session]) -> None:
     task_name = f"checkpoint-test-{uuid4()}"
     event_id = "event"

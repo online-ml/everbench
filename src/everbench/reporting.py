@@ -108,7 +108,11 @@ def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, A
                 """SELECT model.model_id,
                       model.owner,
                       model.created_at,
-                      COALESCE(artifact.metadata ->> 'class_definition', '') AS class_definition,
+                      COALESCE(
+                          artifact.metadata ->> 'class_definition',
+                          artifact.metadata ->> 'source_code',
+                          ''
+                      ) AS class_definition,
                       COALESCE(artifact.metadata ->> 'class_name', 'pickle') AS class_name
                  FROM benchmark_models AS model
                  LEFT JOIN model_artifacts AS artifact ON artifact.artifact_id = model.artifact_id
