@@ -3,6 +3,26 @@ const updated = document.querySelector('[data-updated]');
 const sortStates = new Map();
 let modelDetailRequest;
 
+function positionFailureMarkers(root = document) {
+  const shells = root.matches?.('[data-leaderboard-shell]')
+    ? [root]
+    : root.querySelectorAll('[data-leaderboard-shell]');
+  shells.forEach(shell => {
+    const table = shell.querySelector('[data-sortable]');
+    if (!table) return;
+
+    const shellTop = shell.getBoundingClientRect().top;
+    const rows = new Map([...table.tBodies[0].rows].map(row => [row.dataset.modelId, row]));
+    shell.querySelectorAll('[data-model-failure-marker]').forEach(marker => {
+      const row = rows.get(marker.dataset.modelFailureMarker);
+      if (!row) return;
+      const bounds = row.getBoundingClientRect();
+      marker.style.top = `${bounds.top - shellTop + bounds.height / 2}px`;
+      marker.hidden = false;
+    });
+  });
+}
+
 function updateAge() {
   const seconds = Math.max(0, (Date.now() - updatedAt) / 1000);
   updated.textContent = `updated ${seconds.toFixed(1)}s ago`;
@@ -44,6 +64,7 @@ function sortTable(table) {
   table.querySelectorAll('[data-sort-direction]').forEach(button => button.removeAttribute('data-sort-direction'));
   table.tHead.rows[0].cells[state.column].querySelector('[data-sort-type]').dataset.sortDirection =
     state.direction === 1 ? 'ascending' : 'descending';
+  positionFailureMarkers(table.closest('[data-leaderboard-shell]'));
 }
 
 function restoreSorting(root = document) {
@@ -60,6 +81,7 @@ function restoreSorting(root = document) {
     }
     sortTable(table);
   });
+  positionFailureMarkers(root);
 }
 
 document.body.addEventListener('htmx:afterSwap', event => {
@@ -133,6 +155,7 @@ document.addEventListener('click', async event => {
 
 updateRelativeTimes();
 restoreSorting();
+window.addEventListener('resize', () => positionFailureMarkers());
 setInterval(() => {
   updateAge();
   updateRelativeTimes();

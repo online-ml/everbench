@@ -1,5 +1,17 @@
 {% macro leaderboard_table(rows, table_name, show_medals) -%}
-<div class="table-scroll leaderboard-scroll" {% if not rows %}hidden{% endif %}>
+<div class="leaderboard-shell" data-leaderboard-shell {% if not rows %}hidden{% endif %}>
+{% for row in rows %}
+  {% if row.disabled_until %}
+    <div class="model-failure-marker" data-model-failure-marker="{{ row.model_id }}" hidden>
+      <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
+      <template>
+        <p>Paused after {{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}; retry {{ row.disabled_until|time_until }}{% if row.failed_at %} (last failure {{ row.failed_at|time_since }}){% endif %}.</p>
+        <pre><code>{{ row.last_error }}</code></pre>
+      </template>
+    </div>
+  {% endif %}
+{% endfor %}
+<div class="table-scroll">
 <table class="leaderboard" data-sortable data-sort-table="{{ table_name }}">
   <colgroup>
     <col class="leaderboard-model-column">
@@ -20,15 +32,8 @@
   </thead>
   <tbody>
     {% for row in rows %}
-      <tr>
+      <tr data-model-id="{{ row.model_id }}">
         <td class="model-cell" data-sort-value="{{ row.model_id }}">
-          {% if row.disabled_until %}
-            <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
-            <template>
-              <p>Paused after {{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}; retry {{ row.disabled_until|time_until }}{% if row.failed_at %} (last failure {{ row.failed_at|time_since }}){% endif %}.</p>
-              <pre><code>{{ row.last_error }}</code></pre>
-            </template>
-          {% endif %}
           <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
         </td>
         <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
@@ -41,6 +46,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 </div>
 {%- endmacro %}
 

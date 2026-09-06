@@ -137,7 +137,9 @@ def test_lower_is_better_first_metric_sorts_ascending() -> None:
     assert view["leaderboard_metrics"] == [{"name": "LogLoss", "bigger_is_better": False}]
 
 
-def test_failure_icon_is_rendered_before_the_model_name(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failure_icon_is_rendered_outside_the_scrollable_table(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         reporting,
         "task_leaderboard",
@@ -163,9 +165,12 @@ def test_failure_icon_is_rendered_before_the_model_name(client: FlaskClient, mon
 
     response = client.get("/tasks/dummy/panel")
 
+    marker = response.text.index('class="model-failure-marker"')
+    scroller = response.text.index('class="table-scroll"')
     model_cell = response.text.split('class="model-cell"', 1)[1].split("</td>", 1)[0]
-    assert model_cell.index('class="model-failure"') < model_cell.index('class="model-name"')
-    assert 'class="table-scroll leaderboard-scroll"' in response.text
+    assert marker < scroller
+    assert 'class="model-failure"' not in model_cell
+    assert 'data-model-id="failed-model"' in response.text
 
 
 def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
