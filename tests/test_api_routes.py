@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -135,6 +135,45 @@ def test_lower_is_better_first_metric_sorts_ascending() -> None:
 
     assert [row["model_id"] for row in view["leaderboard"]] == ["low", "high", "missing"]
     assert view["leaderboard_metrics"] == [{"name": "LogLoss", "bigger_is_better": False}]
+
+
+def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def row(model_id: str, score: float, created_at: datetime) -> dict:
+        return {
+            "model_id": model_id,
+            "owner": "test",
+            "active": True,
+            "failure_count": 0,
+            "last_error": None,
+            "failed_at": None,
+            "disabled_until": None,
+            "error_count": 0,
+            "skipped": 0,
+            "created_at": created_at,
+            "predictions": 10,
+            "labels": 10,
+            "metrics": {"Accuracy": score, "LogLoss": 1 - score},
+            "model_bytes": 100,
+        }
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(
+        reporting,
+        "task_leaderboard",
+        lambda session, task_name: [
+            row("established", 0.5, now - timedelta(days=4)),
+            row("recent", 0.99, now - timedelta(days=1)),
+        ],
+    )
+
+    response = client.get("/tasks/dummy/panel")
+
+    assert response.status_code == 200
+    assert "Recently uploaded models (less than 3 days old)" in response.text
+    recent_markup = response.text.split("Recently uploaded models", 1)[1]
+    assert 'data-model-dialog-heading="recent"' in recent_markup
+    assert "metric-medal" not in recent_markup
+    assert "Autonomous research" not in response.text
 
 
 def test_unknown_task_panel_is_not_found(client: FlaskClient) -> None:

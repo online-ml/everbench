@@ -1,3 +1,43 @@
+{% macro leaderboard_table(rows, table_name, show_medals) -%}
+<div class="table-scroll" {% if not rows %}hidden{% endif %}>
+<table class="leaderboard" data-sortable data-sort-table="{{ table_name }}">
+  <thead>
+    <tr>
+      <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>
+      <th><button class="sort-control" type="button" data-sort-type="number">predictions</button></th>
+      <th><button class="sort-control" type="button" data-sort-type="number">labels</button></th>
+      <th><button class="sort-control" type="button" data-sort-type="number">failures</button></th>
+      <th><button class="sort-control" type="button" data-sort-type="number">skipped</button></th>
+      <th><button class="sort-control" type="button" data-sort-type="number">memory</button></th>
+      {% for metric in leaderboard_metrics %}<th><button class="sort-control" type="button" data-sort-type="number"{% if loop.first %} data-sort-default-direction="{{ 'descending' if metric.bigger_is_better else 'ascending' }}"{% endif %}>{{ metric.name }}</button></th>{% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      <tr>
+        <td data-sort-value="{{ row.model_id }}">
+          <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
+          {% if row.disabled_until %}
+            <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
+            <template>
+              <p>Paused after {{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}; retry {{ row.disabled_until|time_until }}{% if row.failed_at %} (last failure {{ row.failed_at|time_since }}){% endif %}.</p>
+              <pre><code>{{ row.last_error }}</code></pre>
+            </template>
+          {% endif %}
+        </td>
+        <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
+        <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
+        <td class="number" data-sort-value="{{ row.error_count }}">{{ row.error_count|number }}</td>
+        <td class="number" data-sort-value="{{ row.skipped }}">{{ row.skipped|number }}</td>
+        <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
+        {% for metric in leaderboard_metrics %}{% set score = row.metrics.get(metric.name) %}{% set medal = row.metric_medals.get(metric.name) if show_medals else none %}<td class="number" data-sort-value="{{ score if score is not none else '' }}">{% if score is not none %}{% if medal %}<span class="metric-medal" role="img" aria-label="{{ medal.label }}">{{ medal.emoji }}</span> {% endif %}{{ "%.3f"|format(score) }}{% else %}{% set missing_score_reason = "No score yet because this model has no evaluated labels." if row.labels == 0 else "No finite score yet because this metric needs more suitable labels." %}<span class="metric-missing" tabindex="0" data-tooltip="{{ missing_score_reason }}" aria-label="{{ missing_score_reason }}">Ø</span>{% endif %}</td>{% endfor %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro %}
+
 <div id="task-panel"
      hx-get="{{ url_for('task_panel', task_name=task_name) }}"
      hx-trigger="every 5s"
@@ -12,73 +52,13 @@
     </dl>
   </section>
 
-  {% if auto_research %}
-  <section>
-    <h2>Autonomous research</h2>
-    <p class="muted">Stable model: <code>{{ auto_research.model_id }}</code>. Candidate code is promoted only on fresh sealed evidence.</p>
-    {% if auto_research.experiments %}
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>started</th><th>generation</th><th>status</th><th>candidate score</th><th>improvement</th><th>hypothesis</th></tr></thead>
-        <tbody>
-        {% for experiment in auto_research.experiments %}{% set evaluation = experiment.evaluation or {} %}
-          <tr>
-            <td>{{ experiment.started_at|time_since }}</td>
-            <td class="number">{{ experiment.parent_generation }}</td>
-            <td>{{ experiment.status }}</td>
-            <td class="number">{% if evaluation.get("candidate_score") is not none %}{{ "%.6f"|format(evaluation.candidate_score) }}{% else %}—{% endif %}</td>
-            <td class="number">{% if evaluation.get("improvement") is not none %}{{ "%+.6f"|format(evaluation.improvement) }}{% else %}—{% endif %}</td>
-            <td>{{ experiment.hypothesis or experiment.error or "—" }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <p class="muted">No reflections have completed yet.</p>
-    {% endif %}
-  </section>
-  {% endif %}
-
   <section>
     <h2>Leaderboard</h2>
-    <div class="table-scroll" {% if not leaderboard %}hidden{% endif %}>
-    <table class="leaderboard" data-sortable data-sort-table="leaderboard">
-      <thead>
-        <tr>
-          <th><button class="sort-control" type="button" data-sort-type="text">model</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">predictions</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">labels</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">failures</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">skipped</button></th>
-          <th><button class="sort-control" type="button" data-sort-type="number">memory</button></th>
-          {% for metric in leaderboard_metrics %}<th><button class="sort-control" type="button" data-sort-type="number"{% if loop.first %} data-sort-default-direction="{{ 'descending' if metric.bigger_is_better else 'ascending' }}"{% endif %}>{{ metric.name }}</button></th>{% endfor %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in leaderboard %}
-          <tr>
-            <td data-sort-value="{{ row.model_id }}">
-              <button class="model-name" type="button" data-model-dialog-url="{{ url_for('model_detail', task_name=task_name, model_id=row.model_id) }}" data-model-dialog-heading="{{ row.model_id }}">{{ row.model_id }}</button>
-              {% if row.disabled_until %}
-                <button class="model-failure" type="button" data-model-dialog data-model-dialog-heading="{{ row.model_id }} / model failure" aria-label="Show model failure"></button>
-                <template>
-                  <p>Paused after {{ row.failure_count }} consecutive failed cycle{{ "s" if row.failure_count != 1 else "" }}; retry {{ row.disabled_until|time_until }}{% if row.failed_at %} (last failure {{ row.failed_at|time_since }}){% endif %}.</p>
-                  <pre><code>{{ row.last_error }}</code></pre>
-                </template>
-              {% endif %}
-            </td>
-            <td class="number" data-sort-value="{{ row.predictions }}">{{ row.predictions|number }}</td>
-            <td class="number" data-sort-value="{{ row.labels }}">{{ row.labels|number }}</td>
-            <td class="number" data-sort-value="{{ row.error_count }}">{{ row.error_count|number }}</td>
-            <td class="number" data-sort-value="{{ row.skipped }}">{{ row.skipped|number }}</td>
-            <td class="number" data-sort-value="{{ row.model_bytes }}">{{ row.model_bytes|file_size }}</td>
-            {% for metric in leaderboard_metrics %}{% set score = row.metrics.get(metric.name) %}{% set medal = row.metric_medals.get(metric.name) %}<td class="number" data-sort-value="{{ score if score is not none else '' }}">{% if score is not none %}{% if medal %}<span class="metric-medal" role="img" aria-label="{{ medal.label }}">{{ medal.emoji }}</span> {% endif %}{{ "%.3f"|format(score) }}{% else %}{% set missing_score_reason = "No score yet because this model has no evaluated labels." if row.labels == 0 else "No finite score yet because this metric needs more suitable labels." %}<span class="metric-missing" tabindex="0" data-tooltip="{{ missing_score_reason }}" aria-label="{{ missing_score_reason }}">Ø</span>{% endif %}</td>{% endfor %}
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    <p class="muted" {% if leaderboard %}hidden{% endif %}>No models are registered for this task.</p>
+    {{ leaderboard_table(leaderboard, "leaderboard", true) }}
+    {% if recent_leaderboard %}
+      <p class="recent-models-note"><em>Recently uploaded models (less than 3 days old) are listed separately while their metrics accumulate enough examples.</em></p>
+      {{ leaderboard_table(recent_leaderboard, "recent-leaderboard", false) }}
+    {% endif %}
+    {% if not leaderboard and not recent_leaderboard %}<p class="muted">No models are registered for this task.</p>{% endif %}
   </section>
 </div>

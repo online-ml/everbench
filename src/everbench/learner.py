@@ -54,7 +54,11 @@ def _restore_uncheckpointed_learning(
     # Snapshots created before checkpoint watermarks existed were written after
     # every learning batch. Treat them as authoritative to avoid replaying
     # their already-included history twice.
-    if snapshot is not None and snapshot.checkpoint_label_available_at is None:
+    if (
+        snapshot is not None
+        and snapshot.checkpoint_label_available_at is None
+        and snapshot.checkpoint_ready_sequence is None
+    ):
         return
     for event_id, event, y in model_store.trained_examples_since_checkpoint(
         session,
@@ -62,6 +66,7 @@ def _restore_uncheckpointed_learning(
         registration.model_id,
         snapshot.checkpoint_label_available_at if snapshot is not None else None,
         snapshot.checkpoint_event_sequence if snapshot is not None else None,
+        snapshot.checkpoint_ready_sequence if snapshot is not None else None,
     ):
         model.learn_one(event_id, event, y)
 
@@ -114,7 +119,11 @@ def _active_models(
                 # batch before source rows can be archived.
                 checkpointed_at = (
                     time.monotonic()
-                    if snapshot is not None and snapshot.checkpoint_label_available_at is not None
+                    if snapshot is not None
+                    and (
+                        snapshot.checkpoint_ready_sequence is not None
+                        or snapshot.checkpoint_label_available_at is not None
+                    )
                     else 0.0
                 )
                 cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
@@ -139,43 +148,61 @@ def _learn_model(
 ) -> tuple[int, int, int]:
     """Process one model in the caller's savepoint."""
     model, tracker = cached.model, cached.tracker
-    skipped = event_store.labelled_unpredicted_events(
-        session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
+    events = event_store.events_after_cursor(
+        session,
+        task.TASK_NAME,
+        model.model_id,
+        registration.prediction_cursor_sequence,
+        registration.start_sequence,
+        CONFIG.learner_batch_size,
     )
-    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, skipped)
-    if hot is not None:
-        hot.mark_labelled(skipped)
-    evaluations = event_store.unevaluated_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
-    if hot is not None:
-        hot.mark_labelled([event_id for event_id, _, _ in evaluations])
-    for _, y, prediction in evaluations:
-        tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
-    event_store.add_metric_updates(
-        session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _ in evaluations]
-    )
-    labels = event_store.untrained_labels(session, task.TASK_NAME, model.model_id, CONFIG.learner_batch_size)
-    if hot is not None:
-        hot.mark_labelled([event_id for event_id, _, _, _ in labels])
-    if model.supports_learning:
-        label_events = _events(session, task.TASK_NAME, [event_id for event_id, _, _, _ in labels], hot)
-        for event_id, y, _, _ in labels:
-            model.learn_one(event_id, label_events[event_id], y)
-    event_store.add_trainings(session, task.TASK_NAME, model.model_id, [event_id for event_id, _, _, _ in labels])
-    events = event_store.unpredicted_events(
-        session, task.TASK_NAME, model.model_id, registration.start_sequence, CONFIG.learner_batch_size
-    )
-    prediction_events = _events(session, task.TASK_NAME, events, hot)
+    prelabelled = [event_id for event_id, _, labelled, has_state in events if labelled and not has_state]
+    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, prelabelled)
+    predictable = [event_id for event_id, _, labelled, has_state in events if not labelled and not has_state]
+    prediction_events = _events(session, task.TASK_NAME, predictable, hot)
     predictions = [
         (
             event_id,
             prediction_for(task, model, event_id, prediction_events[event_id]),
         )
-        for event_id in events
+        for event_id in predictable
     ]
     inserted_predictions = set(event_store.add_predictions(session, task.TASK_NAME, model.model_id, predictions))
     raced_labels = [event_id for event_id, _ in predictions if event_id not in inserted_predictions]
     event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, raced_labels)
     tracker.predictions += len(inserted_predictions)
+    if events:
+        registration.prediction_cursor_sequence = events[-1][1]
+
+    labels = event_store.ready_labels_after_cursor(
+        session,
+        task.TASK_NAME,
+        model.model_id,
+        registration.label_cursor_sequence,
+        registration.start_sequence,
+        CONFIG.learner_batch_size,
+    )
+    missing_state = [row[1] for row in labels if row[6] is None]
+    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, missing_state)
+    evaluations = [row for row in labels if row[6] == "predicted" and not row[7]]
+    for row in evaluations:
+        tracker.update(
+            row[2],
+            row[5],
+            lambda metric, target, value: metric_inputs_for(task, metric, target, value),
+        )
+    event_store.add_metric_updates(session, task.TASK_NAME, model.model_id, [row[1] for row in evaluations])
+    untrained = [row for row in labels if not row[8]]
+    if hot is not None:
+        hot.mark_labelled([row[1] for row in labels])
+    if model.supports_learning:
+        label_events = _events(session, task.TASK_NAME, [row[1] for row in untrained], hot)
+        for row in untrained:
+            model.learn_one(row[1], label_events[row[1]], row[2])
+    event_store.add_trainings(session, task.TASK_NAME, model.model_id, [row[1] for row in untrained])
+    if labels:
+        registration.label_cursor_sequence = labels[-1][0]
+
     if labels or evaluations or predictions:
         model_store.save_metric_state(
             session,
@@ -188,17 +215,23 @@ def _learn_model(
             tracker.values(),
         )
         if labels and time.monotonic() - cached.checkpointed_at >= CONFIG.model_checkpoint_seconds:
-            _, _, label_available_at, event_sequence = labels[-1]
+            ready_sequence, _, _, label_available_at, event_sequence, *_ = labels[-1]
             payload = model.payload()
             if len(payload) > CONFIG.max_model_snapshot_bytes:
                 raise ValueError(
                     f"serialized model is {len(payload):,} bytes; limit is {CONFIG.max_model_snapshot_bytes:,} bytes"
                 )
             model_store.save_pickle_snapshot(
-                session, task.TASK_NAME, model.model_id, payload, label_available_at, event_sequence
+                session,
+                task.TASK_NAME,
+                model.model_id,
+                payload,
+                label_available_at,
+                event_sequence,
+                ready_sequence,
             )
             cached.checkpointed_at = time.monotonic()
-    return len(labels), len(inserted_predictions), len(evaluations)
+    return len(untrained), len(inserted_predictions), len(evaluations)
 
 
 def learn_once(

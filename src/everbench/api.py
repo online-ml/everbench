@@ -7,7 +7,7 @@ import math
 import os
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache, wraps
 from hmac import compare_digest
 from importlib.metadata import distributions
@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.http import dump_options_header
 
 from everbench import archive, archive_store, artifacts, event_store, model_store, reporting
-from everbench.auto import store as auto_store
 from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
@@ -164,7 +163,18 @@ def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, 
         }
         for metric in configured_metrics
     ]
-    leaderboard = [{**row, "metric_medals": {}} for row in rows]
+    cutoff = datetime.now(UTC) - timedelta(days=3)
+
+    def is_recent(row: dict[str, Any]) -> bool:
+        created_at = row.get("created_at")
+        if not isinstance(created_at, datetime):
+            return False
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        return created_at > cutoff
+
+    leaderboard = [{**row, "metric_medals": {}} for row in rows if not is_recent(row)]
+    recent_leaderboard = [{**row, "metric_medals": {}} for row in rows if is_recent(row)]
 
     for metric in metrics:
         scores = []
@@ -203,7 +213,12 @@ def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, 
         return False, -score if first_metric["bigger_is_better"] else score
 
     leaderboard.sort(key=first_metric_sort_key)
-    return {"leaderboard": leaderboard, "leaderboard_metrics": metrics}
+    recent_leaderboard.sort(key=first_metric_sort_key)
+    return {
+        "leaderboard": leaderboard,
+        "recent_leaderboard": recent_leaderboard,
+        "leaderboard_metrics": metrics,
+    }
 
 
 def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
@@ -219,17 +234,10 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
         except ValueError:
             hot_store = None
     leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
-    auto_research = None
-    if task.AUTO_RESEARCH is not None:
-        auto_research = {
-            "model_id": task.AUTO_RESEARCH.model_id,
-            "experiments": auto_store.recent_experiments(session, task_name, task.AUTO_RESEARCH.model_id, limit=5),
-        }
     return {
         "stats": reporting.task_stats(session, task_name),
         **leaderboard,
         "hot_store": hot_store,
-        "auto_research": auto_research,
     }
 
 

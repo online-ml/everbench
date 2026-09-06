@@ -64,6 +64,47 @@ class BenchmarkLabel(Base):
     inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ReadyLabel(Base):
+    """A durable, append-only ordering for labels whose event is available."""
+
+    __tablename__ = "benchmark_ready_labels"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_name", "event_id"],
+            ["benchmark_events.task_name", "benchmark_events.event_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["task_name", "event_id"],
+            ["benchmark_labels.task_name", "benchmark_labels.event_id"],
+            ondelete="CASCADE",
+        ),
+        Index("benchmark_ready_labels_task_sequence_idx", "task_name", "sequence"),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False, unique=True)
+
+
+class NegativeLabelSchedule(Base):
+    """Events awaiting their task's negative-label horizon."""
+
+    __tablename__ = "benchmark_negative_label_schedule"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_name", "event_id"],
+            ["benchmark_events.task_name", "benchmark_events.event_id"],
+            ondelete="CASCADE",
+        ),
+        Index("benchmark_negative_label_schedule_due_idx", "task_name", "due_at"),
+    )
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ModelEventState(Base):
     """One model's durable progress for one benchmark event."""
 
@@ -142,6 +183,8 @@ class ModelRegistration(Base):
     skipped_predictions: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     skipped_labels: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    prediction_cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    label_cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -175,6 +218,7 @@ class ModelSnapshot(Base):
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     checkpoint_label_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     checkpoint_event_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    checkpoint_ready_sequence: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

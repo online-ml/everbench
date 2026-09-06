@@ -135,7 +135,7 @@ def load_task_named(task_name: str, directory: str | Path = "tasks") -> TaskDefi
     raise LookupError(f"no task definition found for {task_name!r}")
 
 
-def discover_tasks(directory: str | Path = "tasks") -> list[TaskDefinition]:
+def discover_tasks(directory: str | Path = "tasks", task_names: Iterable[str] = ()) -> list[TaskDefinition]:
     paths = task_paths(directory)
     if not paths:
         raise LookupError(f"no task definitions found in {Path(directory)}")
@@ -144,4 +144,10 @@ def discover_tasks(directory: str | Path = "tasks") -> list[TaskDefinition]:
     duplicates = sorted(name for name in set(names) if names.count(name) > 1)
     if duplicates:
         raise ValueError(f"task names must be unique: {', '.join(duplicates)}")
+    requested = set(task_names)
+    if requested:
+        missing = requested - set(names)
+        if missing:
+            raise LookupError(f"task definitions not found: {', '.join(sorted(missing))}")
+        tasks = [task for task in tasks if task.TASK_NAME in requested]
     return tasks

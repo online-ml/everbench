@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from everbench import archive, archive_store, artifacts, event_store, model_store
 from everbench.api import task_source_url, validation_examples
 from everbench.batching import TimedBatch
+from everbench.collectors import CollectorBatch, StreamCursorState
 from everbench.learner import _load_model
 from everbench.models import PickledModel, prediction_for, validate_model
 from everbench.tasks import TaskDefinition
@@ -89,6 +90,28 @@ def test_idle_batch_flushes_without_another_source_item() -> None:
 
     assert batch.flush_if_due()
     assert flushed == [["one"]]
+
+
+def test_filtered_stream_messages_checkpoint_without_filling_the_ingest_batch() -> None:
+    state = StreamCursorState("initial")
+    flushed: list[tuple[list[str], str | None]] = []
+    checkpoints: list[str] = []
+    batch = CollectorBatch(state, lambda items, cursor: flushed.append((list(items), cursor)), checkpoints.append)
+
+    batch.observe(None, "filtered-1")
+    batch.observe(None, "filtered-2")
+
+    assert flushed == []
+    assert checkpoints == []
+    batch._checkpointed_at = 0
+    batch.tick()
+    assert checkpoints == ["filtered-2"]
+    assert state.value == "filtered-2"
+
+    batch.observe("accepted", "accepted-3")
+    assert batch.flush()
+    assert flushed == [(["accepted"], "accepted-3")]
+    assert state.value == "accepted-3"
 
 
 def test_upload_validation_uses_recent_postgres_labels_before_archives(monkeypatch: pytest.MonkeyPatch) -> None:

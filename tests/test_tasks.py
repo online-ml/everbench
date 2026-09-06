@@ -49,6 +49,22 @@ def test_rejects_duplicate_task_names(tmp_path: Path) -> None:
         discover_tasks(tmp_path)
 
 
+def test_discovers_only_explicitly_selected_tasks(tmp_path: Path) -> None:
+    for name in ("production", "dummy"):
+        write_task(tmp_path, name, name)
+
+    tasks = discover_tasks(tmp_path, ["production"])
+
+    assert [task.TASK_NAME for task in tasks] == ["production"]
+
+
+def test_rejects_unknown_selected_tasks(tmp_path: Path) -> None:
+    write_task(tmp_path, "production", "production")
+
+    with pytest.raises(LookupError, match="missing"):
+        discover_tasks(tmp_path, ["missing"])
+
+
 def test_wiki_task_accepts_a_live_reverted_tag_event() -> None:
     task = load_task("tasks/wiki_liftwing/task.py")
     event = {

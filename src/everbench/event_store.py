@@ -7,12 +7,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from everbench.db import advisory_key
-from everbench.schema import BenchmarkEvent, BenchmarkLabel, ModelEventState, StreamCursor
+from everbench.schema import (
+    BenchmarkEvent,
+    BenchmarkLabel,
+    ModelEventState,
+    NegativeLabelSchedule,
+    StreamCursor,
+)
 
 
 @dataclass(frozen=True)
@@ -76,28 +82,91 @@ def add_events(
                 "delay_seconds": delay_seconds,
             },
         )
+        session.execute(
+            text(
+                """INSERT INTO benchmark_negative_label_schedule (task_name, event_id, due_at)
+                   SELECT event.task_name, event.event_id,
+                          event.event_time + make_interval(secs => :delay_seconds)
+                     FROM benchmark_events AS event
+                     LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
+                    WHERE event.task_name = :task_name
+                      AND event.event_id = ANY(CAST(:event_ids AS text[]))
+                      AND label.event_id IS NULL
+                   ON CONFLICT (task_name, event_id) DO NOTHING"""
+            ),
+            {
+                "task_name": task_name,
+                "event_ids": inserted_event_ids,
+                "delay_seconds": delay_seconds,
+            },
+        )
+    _mark_ready_labels(session, task_name, inserted_event_ids)
     return inserted_event_ids
+
+
+def _mark_ready_labels(session: Session, task_name: str, event_ids: list[str]) -> list[str]:
+    """Append newly matched event/label pairs to the learner's durable queue."""
+    if not event_ids:
+        return []
+    return list(
+        session.scalars(
+            text(
+                """INSERT INTO benchmark_ready_labels (task_name, event_id)
+                   SELECT event.task_name, event.event_id
+                     FROM benchmark_events AS event
+                     JOIN benchmark_labels AS label USING (task_name, event_id)
+                    WHERE event.task_name = :task_name
+                      AND event.event_id = ANY(CAST(:event_ids AS text[]))
+                   ON CONFLICT (task_name, event_id) DO NOTHING
+                   RETURNING event_id"""
+            ),
+            {"task_name": task_name, "event_ids": event_ids},
+        )
+    )
+
+
+def ensure_negative_label_schedule(session: Session, task_name: str, delay_seconds: float | None) -> int:
+    """One-time/backfill safety net; steady-state inserts are handled with events."""
+    if delay_seconds is None:
+        return 0
+    inserted = session.scalars(
+        text(
+            """INSERT INTO benchmark_negative_label_schedule (task_name, event_id, due_at)
+               SELECT event.task_name, event.event_id,
+                      event.event_time + make_interval(secs => :delay_seconds)
+                 FROM benchmark_events AS event
+                 LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
+                WHERE event.task_name = :task_name AND label.event_id IS NULL
+               ON CONFLICT (task_name, event_id) DO NOTHING
+               RETURNING event_id"""
+        ),
+        {"task_name": task_name, "delay_seconds": delay_seconds},
+    )
+    return len(list(inserted))
 
 
 def add_expired_negative_labels(session: Session, task_name: str, delay_seconds: float | None) -> list[str]:
     if delay_seconds is None:
         return []
-    return list(
+    event_ids = list(
         session.scalars(
             text(
-                """INSERT INTO benchmark_labels (task_name, event_id, y, reason)
-               SELECT event.task_name, event.event_id, to_jsonb(0), 'not-positive-within-horizon'
-               FROM benchmark_events AS event
-               LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
-               WHERE event.task_name = :task_name
-                 AND event.event_time <= now() - make_interval(secs => :delay_seconds)
-                 AND label.event_id IS NULL
-               ON CONFLICT (task_name, event_id) DO NOTHING
-               RETURNING event_id"""
+                """WITH due AS (
+                     DELETE FROM benchmark_negative_label_schedule
+                      WHERE task_name = :task_name AND due_at <= now()
+                      RETURNING task_name, event_id
+                   )
+                   INSERT INTO benchmark_labels (task_name, event_id, y, reason)
+                   SELECT task_name, event_id, to_jsonb(0), 'not-positive-within-horizon'
+                     FROM due
+                   ON CONFLICT (task_name, event_id) DO NOTHING
+                   RETURNING event_id"""
             ),
-            {"task_name": task_name, "delay_seconds": delay_seconds},
+            {"task_name": task_name},
         ).all()
     )
+    _mark_ready_labels(session, task_name, event_ids)
+    return event_ids
 
 
 def purge_orphan_labels(session: Session, task_name: str, cutoff: datetime) -> int:
@@ -161,7 +230,16 @@ def add_labels(session: Session, task_name: str, labels: list[LabelInput], delay
         .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
         .returning(BenchmarkLabel.event_id)
     )
-    return list(session.scalars(statement).all())
+    inserted_event_ids = list(session.scalars(statement).all())
+    if inserted_event_ids:
+        session.execute(
+            delete(NegativeLabelSchedule).where(
+                NegativeLabelSchedule.task_name == task_name,
+                NegativeLabelSchedule.event_id.in_(inserted_event_ids),
+            )
+        )
+        _mark_ready_labels(session, task_name, inserted_event_ids)
+    return inserted_event_ids
 
 
 def stream_cursor(session: Session, task_name: str, stream_name: str) -> str | None:
@@ -177,6 +255,79 @@ def save_stream_cursor(session: Session, task_name: str, stream_name: str, event
             index_elements=["task_name", "stream_name"], set_={"event_id": event_id, "updated_at": func.now()}
         )
     )
+
+
+def events_after_cursor(
+    session: Session,
+    task_name: str,
+    model_id: str,
+    cursor_sequence: int,
+    start_sequence: int,
+    limit: int = 500,
+) -> list[tuple[str, int, bool, bool]]:
+    """Read each accepted event once per model using the event sequence index."""
+    rows = session.execute(
+        text(
+            """SELECT event.event_id, event.sequence,
+                      label.event_id IS NOT NULL AS labelled,
+                      state.event_id IS NOT NULL AS has_state
+                 FROM benchmark_events AS event
+                 LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
+                 LEFT JOIN benchmark_model_events AS state
+                   ON state.task_name = event.task_name AND state.event_id = event.event_id
+                  AND state.model_id = :model_id
+                WHERE event.task_name = :task_name
+                  AND event.sequence > :cursor_sequence
+                  AND event.sequence >= :start_sequence
+                ORDER BY event.sequence
+                LIMIT :limit"""
+        ),
+        {
+            "task_name": task_name,
+            "model_id": model_id,
+            "cursor_sequence": cursor_sequence,
+            "start_sequence": start_sequence,
+            "limit": limit,
+        },
+    )
+    return [(event_id, sequence, labelled, has_state) for event_id, sequence, labelled, has_state in rows]
+
+
+def ready_labels_after_cursor(
+    session: Session,
+    task_name: str,
+    model_id: str,
+    cursor_sequence: int,
+    start_sequence: int,
+    limit: int = 500,
+) -> list[tuple[int, str, Any, datetime, int, Any, str | None, bool, bool]]:
+    """Read each matched label once per model from its compact append-only queue."""
+    rows = session.execute(
+        text(
+            """SELECT ready.sequence, ready.event_id, label.y, label.available_at, event.sequence,
+                      state.prediction, state.prediction_status,
+                      state.evaluated_at IS NOT NULL, state.trained_at IS NOT NULL
+                 FROM benchmark_ready_labels AS ready
+                 JOIN benchmark_events AS event USING (task_name, event_id)
+                 JOIN benchmark_labels AS label USING (task_name, event_id)
+                 LEFT JOIN benchmark_model_events AS state
+                   ON state.task_name = ready.task_name AND state.event_id = ready.event_id
+                  AND state.model_id = :model_id
+                WHERE ready.task_name = :task_name
+                  AND ready.sequence > :cursor_sequence
+                  AND event.sequence >= :start_sequence
+                ORDER BY ready.sequence
+                LIMIT :limit"""
+        ),
+        {
+            "task_name": task_name,
+            "model_id": model_id,
+            "cursor_sequence": cursor_sequence,
+            "start_sequence": start_sequence,
+            "limit": limit,
+        },
+    )
+    return [tuple(row) for row in rows]
 
 
 def untrained_labels(
@@ -264,14 +415,22 @@ def _model_processing_pending_clause() -> str:
           WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
         )
         OR EXISTS (
-          SELECT 1 FROM model_snapshots AS snapshot
-          WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
-            AND (
-              snapshot.checkpoint_label_available_at IS NULL
-              OR snapshot.checkpoint_label_available_at < label.available_at
-              OR (snapshot.checkpoint_label_available_at = label.available_at
-                  AND snapshot.checkpoint_event_sequence < event.sequence)
-            )
+          SELECT 1
+            FROM model_snapshots AS snapshot
+            JOIN benchmark_ready_labels AS ready
+              ON ready.task_name = event.task_name AND ready.event_id = event.event_id
+           WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
+             AND (
+               (snapshot.checkpoint_ready_sequence IS NOT NULL
+                AND snapshot.checkpoint_ready_sequence < ready.sequence)
+               OR
+               (snapshot.checkpoint_ready_sequence IS NULL AND (
+                 snapshot.checkpoint_label_available_at IS NULL
+                 OR snapshot.checkpoint_label_available_at < label.available_at
+                 OR (snapshot.checkpoint_label_available_at = label.available_at
+                     AND snapshot.checkpoint_event_sequence < event.sequence)
+               ))
+             )
         )
     )"""
 

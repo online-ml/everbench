@@ -20,6 +20,7 @@ from everbench.schema import (
     ModelEventState,
     ModelRegistration,
     ModelSnapshot,
+    ReadyLabel,
 )
 
 
@@ -127,12 +128,20 @@ def register_model(
     start_sequence = session.scalar(
         select(func.coalesce(func.max(BenchmarkEvent.sequence) + 1, 1)).where(BenchmarkEvent.task_name == task_name)
     )
+    start_sequence = int(start_sequence or 1)
     registration = ModelRegistration(
         task_name=task_name,
         model_id=model_id,
         owner=owner,
         artifact_id=artifact_id,
         start_sequence=start_sequence,
+        prediction_cursor_sequence=start_sequence - 1,
+        label_cursor_sequence=int(
+            session.scalar(
+                select(func.coalesce(func.max(ReadyLabel.sequence), 0)).where(ReadyLabel.task_name == task_name)
+            )
+            or 0
+        ),
     )
     session.add(registration)
     return registration, True
@@ -234,6 +243,7 @@ def advance_model_checkpoint(
     registration: ModelRegistration,
     label_available_at: datetime,
     event_sequence: int,
+    ready_sequence: int,
 ) -> None:
     """Mark terminally skipped labels as covered by the model's checkpoint.
 
@@ -252,6 +262,7 @@ def advance_model_checkpoint(
                 artifact_id=registration.artifact_id,
                 checkpoint_label_available_at=label_available_at,
                 checkpoint_event_sequence=event_sequence,
+                checkpoint_ready_sequence=ready_sequence,
             )
         )
         return
@@ -264,36 +275,49 @@ def advance_model_checkpoint(
     ):
         snapshot.checkpoint_label_available_at = label_available_at
         snapshot.checkpoint_event_sequence = event_sequence
+    if snapshot.checkpoint_ready_sequence is None or ready_sequence > snapshot.checkpoint_ready_sequence:
+        snapshot.checkpoint_ready_sequence = ready_sequence
 
 
 def record_disabled_work(
     session: Session, task_name: str, registration: ModelRegistration, limit: int
 ) -> tuple[int, int]:
     """Terminally skip bounded work for a paused model and count it durably."""
-    labelled = event_store.labelled_unpredicted_events(
-        session, task_name, registration.model_id, registration.start_sequence, limit
+    events = event_store.events_after_cursor(
+        session,
+        task_name,
+        registration.model_id,
+        registration.prediction_cursor_sequence,
+        registration.start_sequence,
+        limit,
     )
-    events = labelled + event_store.unpredicted_events(
-        session, task_name, registration.model_id, registration.start_sequence, max(limit - len(labelled), 0)
-    )
+    missing = [event_id for event_id, _, _, has_state in events if not has_state]
     skipped_predictions = len(
-        event_store.add_prediction_skips(session, task_name, registration.model_id, events, "model-disabled")
+        event_store.add_prediction_skips(session, task_name, registration.model_id, missing, "model-disabled")
     )
-    evaluations = event_store.unevaluated_labels(session, task_name, registration.model_id, limit)
-    event_store.add_metric_updates(
-        session, task_name, registration.model_id, [event_id for event_id, *_ in evaluations]
+    if events:
+        registration.prediction_cursor_sequence = events[-1][1]
+    labels = event_store.ready_labels_after_cursor(
+        session,
+        task_name,
+        registration.model_id,
+        registration.label_cursor_sequence,
+        registration.start_sequence,
+        limit,
     )
-    labels = event_store.untrained_labels(session, task_name, registration.model_id, limit)
+    missing_label_state = [event_id for _, event_id, *_, prediction_status, _, _ in labels if prediction_status is None]
+    event_store.add_prediction_skips(session, task_name, registration.model_id, missing_label_state, "model-disabled")
+    evaluations = [row for row in labels if row[6] == "predicted" and not row[7]]
+    event_store.add_metric_updates(session, task_name, registration.model_id, [row[1] for row in evaluations])
+    untrained = [row for row in labels if not row[8]]
     trained_event_ids = event_store.add_trainings(
-        session, task_name, registration.model_id, [event_id for event_id, *_ in labels]
+        session, task_name, registration.model_id, [row[1] for row in untrained]
     )
     skipped_labels = len(trained_event_ids)
-    if trained_event_ids:
-        trained_event_id_set = set(trained_event_ids)
-        last = max(
-            (label for label in labels if label[0] in trained_event_id_set), key=lambda label: (label[2], label[3])
-        )
-        advance_model_checkpoint(session, task_name, registration, last[2], last[3])
+    if labels:
+        last = labels[-1]
+        registration.label_cursor_sequence = last[0]
+        advance_model_checkpoint(session, task_name, registration, last[3], last[4], last[0])
     registration.skipped_predictions += skipped_predictions
     registration.skipped_labels += skipped_labels
     return skipped_predictions, skipped_labels
@@ -349,11 +373,17 @@ def trained_examples_since_checkpoint(
     model_id: str,
     checkpoint_label_available_at: datetime | None,
     checkpoint_event_sequence: int | None,
+    checkpoint_ready_sequence: int | None,
 ) -> list[tuple[str, dict[str, Any], Any]]:
     """Return committed learning updates not represented by a checkpoint."""
     parameters: dict[str, Any] = {"task_name": task_name, "model_id": model_id}
     watermark = ""
-    if checkpoint_label_available_at is not None and checkpoint_event_sequence is not None:
+    order_by = "label.available_at, event.sequence"
+    if checkpoint_ready_sequence is not None:
+        watermark = "AND ready.sequence > :checkpoint_ready_sequence"
+        parameters["checkpoint_ready_sequence"] = checkpoint_ready_sequence
+        order_by = "ready.sequence"
+    elif checkpoint_label_available_at is not None and checkpoint_event_sequence is not None:
         watermark = """AND (label.available_at > :checkpoint_label_available_at
                           OR (label.available_at = :checkpoint_label_available_at
                               AND event.sequence > :checkpoint_event_sequence))"""
@@ -367,10 +397,11 @@ def trained_examples_since_checkpoint(
                  FROM benchmark_model_events AS model_event
                  JOIN benchmark_events AS event USING (task_name, event_id)
                  JOIN benchmark_labels AS label USING (task_name, event_id)
+                 JOIN benchmark_ready_labels AS ready USING (task_name, event_id)
                  WHERE model_event.task_name = :task_name AND model_event.model_id = :model_id
                    AND model_event.trained_at IS NOT NULL
                    {watermark}
-                 ORDER BY label.available_at, event.sequence"""
+                 ORDER BY {order_by}"""
         ),
         parameters,
     )
@@ -384,6 +415,7 @@ def save_pickle_snapshot(
     payload: bytes,
     checkpoint_label_available_at: datetime | None,
     checkpoint_event_sequence: int | None,
+    checkpoint_ready_sequence: int | None,
 ) -> ModelArtifact:
     """Replace the operational checkpoint instead of retaining every batch.
 
@@ -405,6 +437,7 @@ def save_pickle_snapshot(
             artifact_id=artifact_record.artifact_id,
             checkpoint_label_available_at=checkpoint_label_available_at,
             checkpoint_event_sequence=checkpoint_event_sequence,
+            checkpoint_ready_sequence=checkpoint_ready_sequence,
         )
         .on_conflict_do_update(
             index_elements=["task_name", "model_id"],
@@ -412,6 +445,7 @@ def save_pickle_snapshot(
                 "artifact_id": artifact_record.artifact_id,
                 "checkpoint_label_available_at": checkpoint_label_available_at,
                 "checkpoint_event_sequence": checkpoint_event_sequence,
+                "checkpoint_ready_sequence": checkpoint_ready_sequence,
                 "created_at": func.now(),
             },
         )

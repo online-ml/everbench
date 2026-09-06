@@ -143,6 +143,7 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
             payload,
             last.label_available_at,
             last.sequence,
+            None,
         )
     return AutoRunReport(
         task.TASK_NAME,
@@ -346,6 +347,7 @@ def _reflect_once(
                     payload,
                     outcome.checkpoint_label_available_at,
                     outcome.checkpoint_event_sequence,
+                    None,
                 )
             store.finish_experiment(
                 experiment,

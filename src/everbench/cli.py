@@ -55,11 +55,12 @@ def worker(task_file: str) -> None:
     show_default=True,
     type=click.Path(exists=True, file_okay=False, path_type=str),
 )
-def worker_all(tasks_directory: str) -> None:
+@click.option("--task", "task_names", multiple=True, help="Run only the named task (repeatable).")
+def worker_all(tasks_directory: str, task_names: tuple[str, ...]) -> None:
     """Run every top-level task definition in one supervised process."""
     from everbench.runtime import run_tasks
 
-    run_tasks(make_session_factory(), discover_tasks(tasks_directory))
+    run_tasks(make_session_factory(), discover_tasks(tasks_directory, task_names))
 
 
 @main.group("auto")

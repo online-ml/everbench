@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from copy import deepcopy
 from threading import RLock
 from typing import Any
 
@@ -19,7 +18,11 @@ class HotStore:
             raise ValueError("hot store maximum event size must be positive")
         self.capacity = capacity
         self.max_event_bytes = max_event_bytes
-        self._events: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        # Compact JSON bytes avoid the several-times-larger footprint of
+        # retaining hundreds of thousands of nested Python dictionaries. A
+        # fresh mapping is decoded for each model so uploaded models cannot
+        # mutate another model's input.
+        self._events: OrderedDict[str, bytes] = OrderedDict()
         # A label can arrive before the learner has processed it. Track only a
         # bounded set of those IDs so completed events can leave RAM promptly.
         self._labelled: OrderedDict[str, None] = OrderedDict()
@@ -30,21 +33,20 @@ class HotStore:
 
     def put(self, event_id: str, event: dict[str, Any]) -> None:
         """Cache JSON-sized payloads without sharing mutable references."""
-        if self.max_event_bytes is not None:
-            try:
-                encoded = json.dumps(event, separators=(",", ":")).encode()
-            except (TypeError, ValueError):
-                # Postgres is still the authoritative fallback. Refusing an
-                # unusual payload here is safer than keeping unbounded data.
-                with self._lock:
-                    self._bypasses += 1
-                return
-            if len(encoded) > self.max_event_bytes:
-                with self._lock:
-                    self._bypasses += 1
-                return
+        try:
+            encoded = json.dumps(event, separators=(",", ":")).encode()
+        except (TypeError, ValueError):
+            # Postgres is still the authoritative fallback. Refusing an
+            # unusual payload here is safer than keeping unbounded data.
+            with self._lock:
+                self._bypasses += 1
+            return
+        if self.max_event_bytes is not None and len(encoded) > self.max_event_bytes:
+            with self._lock:
+                self._bypasses += 1
+            return
         with self._lock:
-            self._events[event_id] = deepcopy(event)
+            self._events[event_id] = encoded
             self._events.move_to_end(event_id)
             self._trim()
 
@@ -75,18 +77,20 @@ class HotStore:
 
     def event(self, event_id: str) -> dict[str, Any] | None:
         with self._lock:
-            event = self._events.get(event_id)
-            if event is None:
+            encoded = self._events.get(event_id)
+            if encoded is None:
                 self._misses += 1
                 return None
             self._hits += 1
             self._events.move_to_end(event_id)
-            return deepcopy(event)
+            value = json.loads(encoded)
+            return value if isinstance(value, dict) else None
 
     def stats(self) -> dict[str, int]:
         with self._lock:
             return {
                 "entries": len(self._events),
+                "bytes": sum(map(len, self._events.values())),
                 "capacity": self.capacity,
                 "hits": self._hits,
                 "misses": self._misses,

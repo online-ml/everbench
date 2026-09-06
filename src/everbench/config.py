@@ -18,15 +18,16 @@ def _float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class RuntimeConfig:
     ingest_batch_size: int = 200
-    ingest_flush_seconds: float = 1.0
+    ingest_flush_seconds: float = 5.0
     ingest_max_pending_items: int = 2_000
+    stream_cursor_checkpoint_seconds: float = 30.0
     learner_batch_size: int = 500
     learner_idle_seconds: float = 5.0
     heartbeat_seconds: float = 30.0
-    hot_event_capacity: int = 10_000
+    hot_event_capacity: int = 250_000
     hot_event_max_bytes: int = 512 * 1024
     shutdown_flush_seconds: float = 20.0
-    archive_after_days: int = 30
+    archive_after_days: int = 7
     archive_batch_size: int = 10_000
     archive_interval_seconds: float = 3_600.0
     archive_root: Path | None = None
@@ -50,6 +51,7 @@ class RuntimeConfig:
             "ingest_batch_size": self.ingest_batch_size,
             "ingest_flush_seconds": self.ingest_flush_seconds,
             "ingest_max_pending_items": self.ingest_max_pending_items,
+            "stream_cursor_checkpoint_seconds": self.stream_cursor_checkpoint_seconds,
             "learner_batch_size": self.learner_batch_size,
             "learner_idle_seconds": self.learner_idle_seconds,
             "heartbeat_seconds": self.heartbeat_seconds,
@@ -85,6 +87,9 @@ class RuntimeConfig:
             ingest_batch_size=_int("EVERBENCH_INGEST_BATCH_SIZE", defaults.ingest_batch_size),
             ingest_flush_seconds=_float("EVERBENCH_INGEST_FLUSH_SECONDS", defaults.ingest_flush_seconds),
             ingest_max_pending_items=_int("EVERBENCH_INGEST_MAX_PENDING_ITEMS", defaults.ingest_max_pending_items),
+            stream_cursor_checkpoint_seconds=_float(
+                "EVERBENCH_STREAM_CURSOR_CHECKPOINT_SECONDS", defaults.stream_cursor_checkpoint_seconds
+            ),
             learner_batch_size=_int("EVERBENCH_LEARN_BATCH_SIZE", defaults.learner_batch_size),
             learner_idle_seconds=_float("EVERBENCH_LEARN_IDLE_SECONDS", defaults.learner_idle_seconds),
             heartbeat_seconds=_float("EVERBENCH_HEARTBEAT_SECONDS", defaults.heartbeat_seconds),

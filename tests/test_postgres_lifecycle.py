@@ -18,7 +18,14 @@ from everbench import archive, artifacts, event_store, model_store, reporting
 from everbench.config import CONFIG
 from everbench.db import make_session_factory
 from everbench.learner import learn_once
-from everbench.schema import ArchiveManifest, BenchmarkEvent, BenchmarkLabel, ModelEventState, ModelRegistration
+from everbench.schema import (
+    ArchiveManifest,
+    BenchmarkEvent,
+    BenchmarkLabel,
+    ModelEventState,
+    ModelRegistration,
+    ReadyLabel,
+)
 from everbench.tasks import TaskDefinition
 
 
@@ -232,9 +239,15 @@ def test_event_completion_requires_a_model_checkpoint(sessions: sessionmaker[Ses
 
         label_record = session.get(BenchmarkLabel, {"task_name": task_name, "event_id": event_id})
         event = session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id})
-        assert label_record is not None and event is not None
+        ready = session.get(ReadyLabel, {"task_name": task_name, "event_id": event_id})
+        assert label_record is not None and event is not None and ready is not None
         model_store.advance_model_checkpoint(
-            session, task_name, registration, label_record.available_at, event.sequence
+            session,
+            task_name,
+            registration,
+            label_record.available_at,
+            event.sequence,
+            ready.sequence,
         )
         assert event_store.completed_labelled_events(session, task_name, [event_id]) == [event_id]
 

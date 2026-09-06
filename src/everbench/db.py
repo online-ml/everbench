@@ -37,6 +37,7 @@ def make_engine(url: str | None = None) -> Engine:
         # Leave capacity for collectors, heartbeats, and archive work.
         pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "10")),
         max_overflow=0,
+        connect_args={"application_name": os.getenv("RAILWAY_SERVICE_NAME", "everbench")},
     )
 
 
