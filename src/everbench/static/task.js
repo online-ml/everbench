@@ -153,10 +153,9 @@ document.addEventListener('click', async event => {
   if (!dialog.open) dialog.showModal();
 });
 
+updateAge();
 updateRelativeTimes();
 restoreSorting();
 window.addEventListener('resize', () => positionFailureMarkers());
-setInterval(() => {
-  updateAge();
-  updateRelativeTimes();
-}, 1000);
+setInterval(updateAge, 100);
+setInterval(updateRelativeTimes, 1000);
