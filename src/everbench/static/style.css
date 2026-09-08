@@ -26,11 +26,12 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px; text-align: left; vertical-align: top; }
 .table-scroll { overflow-x: auto; }
 .leaderboard-shell { position: relative; }
-.leaderboard { width: 100%; min-width: 900px; }
-.leaderboard-model-column { width: 18%; }
-.leaderboard-predictions-column { width: 11%; }
+.leaderboard { width: 100%; min-width: 960px; table-layout: fixed; }
+.leaderboard-model-column { width: 17.5%; }
+.leaderboard-predictions-column { width: 11.5%; }
 .leaderboard-operation-column { width: 9%; }
 .leaderboard th, .leaderboard td { white-space: nowrap; }
+.leaderboard th { position: relative; }
 .leaderboard th:first-child, .leaderboard td:first-child { position: sticky; left: 0; z-index: 1; }
 .leaderboard th:first-child { z-index: 2; background: #fff; }
 .leaderboard tbody tr:nth-child(odd) td:first-child { background: #f3f3f3; }
@@ -40,7 +41,7 @@ th { font-weight: 700; }
 .metric-medal { display: inline-block; min-width: 1.4em; text-align: center; }
 .metric-missing { position: relative; cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .sort-control { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; text-align: left; }
-.sort-control::after { display: inline-block; width: 1ch; margin-left: .5ch; content: "\00a0"; }
+.sort-control::after { position: absolute; top: 50%; right: 0; transform: translateY(-50%); }
 .sort-control[data-sort-direction="ascending"]::after { content: "↑"; }
 .sort-control[data-sort-direction="descending"]::after { content: "↓"; }
 tbody tr:nth-child(odd) { background: #f3f3f3; }
