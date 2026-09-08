@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive, artifacts, event_store, model_store, reporting
+from everbench.auto import store as auto_store
 from everbench.config import CONFIG
 from everbench.db import make_session_factory
 from everbench.learner import learn_once
@@ -221,6 +222,63 @@ def test_model_detail_uses_autonomous_candidate_source(sessions: sessionmaker[Se
 
     assert detail is not None
     assert detail["class_definition"] == source
+
+
+def test_auto_model_detail_updates_from_research_without_changing_champion(sessions: sessionmaker[Session]) -> None:
+    task_name = f"auto-documentation-test-{uuid4()}"
+    source = "def build_model():\n    return None\n"
+    with sessions.begin() as session:
+        payload = artifacts.dumps(WorkingModel())
+        artifact = model_store.store_artifact(
+            session,
+            payload,
+            artifacts.sign(payload),
+            {"source": "auto-bootstrap", "generation": 0, "source_code": source},
+        )
+        model_store.register_model(session, task_name, "auto", "test", artifact.artifact_id)
+
+    with sessions() as session:
+        detail = reporting.model_detail(session, task_name, "auto")
+        assert detail is not None
+        assert "generation 0" in detail["class_definition"]
+        assert "No research rounds have run yet" in detail["class_definition"]
+
+    with sessions.begin() as session:
+        experiment = auto_store.begin_experiment(
+            session,
+            task_name,
+            "auto",
+            0,
+            "researcher",
+            {},
+            1,
+            10,
+            artifact.artifact_id,
+        )
+        session.flush()
+        experiment_id = experiment.experiment_id
+
+    with sessions() as session:
+        detail = reporting.model_detail(session, task_name, "auto")
+        assert detail is not None
+        assert "1 running" in detail["class_definition"]
+        assert "exploring candidates against generation 0" in detail["class_definition"]
+
+    with sessions.begin() as session:
+        experiment = auto_store.latest_experiment(session, task_name, "auto")
+        assert experiment is not None and experiment.experiment_id == experiment_id
+        auto_store.finish_experiment(experiment, status="rejected", hypothesis="Try richer features.")
+
+    with sessions() as session:
+        detail = reporting.model_detail(session, task_name, "auto")
+        assert detail is not None
+        assert "1 rejected" in detail["class_definition"]
+        assert "Try richer features" in detail["class_definition"]
+        assert "No research round is currently running" in detail["class_definition"]
+        assert detail["class_definition"].endswith(source)
+        champion = model_store.artifact(session, artifact.artifact_id)
+        assert champion is not None
+        assert champion.metadata_["source_code"] == source
 
 
 def test_event_completion_requires_a_model_checkpoint(sessions: sessionmaker[Session]) -> None:

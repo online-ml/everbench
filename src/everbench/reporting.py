@@ -8,7 +8,9 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from everbench.schema import WorkerHeartbeat
+from everbench.auto import store as auto_store
+from everbench.auto.documentation import documented_source
+from everbench.schema import AutoExperiment, WorkerHeartbeat
 
 
 def record_heartbeat(
@@ -108,6 +110,7 @@ def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, A
                 """SELECT model.model_id,
                       model.owner,
                       model.created_at,
+                      artifact.metadata AS artifact_metadata,
                       COALESCE(
                           artifact.metadata ->> 'class_definition',
                           artifact.metadata ->> 'source_code',
@@ -123,4 +126,23 @@ def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, A
         .mappings()
         .one_or_none()
     )
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    detail = dict(row)
+    metadata = detail.pop("artifact_metadata") or {}
+    if metadata.get("source") in {"auto-bootstrap", "auto-promotion"}:
+        counts = {
+            status: count
+            for status, count in session.execute(
+                select(AutoExperiment.status, func.count())
+                .where(AutoExperiment.task_name == task_name, AutoExperiment.model_id == model_id)
+                .group_by(AutoExperiment.status)
+            )
+        }
+        detail["class_definition"] = documented_source(
+            detail["class_definition"],
+            metadata,
+            auto_store.recent_experiments(session, task_name, model_id, limit=5),
+            counts,
+        )
+    return detail

@@ -26,7 +26,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px; text-align: left; vertical-align: top; }
 .table-scroll { overflow-x: auto; }
 .leaderboard-shell { position: relative; }
-.leaderboard { width: 100%; min-width: 900px; table-layout: fixed; }
+.leaderboard { width: 100%; min-width: 900px; }
 .leaderboard-model-column { width: 18%; }
 .leaderboard-predictions-column { width: 11%; }
 .leaderboard-operation-column { width: 9%; }
@@ -40,8 +40,9 @@ th { font-weight: 700; }
 .metric-medal { display: inline-block; min-width: 1.4em; text-align: center; }
 .metric-missing { position: relative; cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .sort-control { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; text-align: left; }
-.sort-control[data-sort-direction="ascending"]::after { content: " ↑"; }
-.sort-control[data-sort-direction="descending"]::after { content: " ↓"; }
+.sort-control::after { display: inline-block; width: 1ch; margin-left: .5ch; content: "\00a0"; }
+.sort-control[data-sort-direction="ascending"]::after { content: "↑"; }
+.sort-control[data-sort-direction="descending"]::after { content: "↓"; }
 tbody tr:nth-child(odd) { background: #f3f3f3; }
 .model-name { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-decoration: underline; text-decoration-thickness: 1px; }
 .model-failure-marker { position: absolute; z-index: 3; left: -19px; width: 16px; height: 16px; transform: translateY(-50%); }
