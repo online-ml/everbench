@@ -13,6 +13,7 @@ from typing import Any
 import cloudpickle
 from river import base
 
+from everbench.auto.dataset import PreparedTemporalSplit
 from everbench.auto.evaluation import EvaluationOutcome, TemporalSplit
 from everbench.auto.research import Objective
 
@@ -84,7 +85,8 @@ def _run_runtime(payload: dict[str, Any], timeout_seconds: float, max_output_byt
         root = Path(directory)
         request_path = root / "request.pkl"
         result_path = root / "result.pkl"
-        request_path.write_bytes(cloudpickle.dumps(payload))
+        with request_path.open("wb") as request_file:
+            cloudpickle.dump(payload, request_file)
 
         def limits() -> None:
             try:
@@ -119,7 +121,8 @@ def _run_runtime(payload: dict[str, Any], timeout_seconds: float, max_output_byt
             raise RuntimeError("candidate subprocess produced no result")
         if result_path.stat().st_size > max_output_bytes:
             raise ValueError("candidate subprocess result exceeds the artifact limit")
-        result = cloudpickle.loads(result_path.read_bytes())
+        with result_path.open("rb") as result_file:
+            result = cloudpickle.load(result_file)
         if not isinstance(result, dict):
             raise RuntimeError("candidate subprocess returned an invalid result")
         if error := result.get("error"):
@@ -146,7 +149,7 @@ def build_candidate_model(
 def evaluate_candidate_source(
     source: str,
     champion: base.Classifier,
-    split: TemporalSplit,
+    split: TemporalSplit | PreparedTemporalSplit,
     objective: Objective,
     *,
     max_prediction_time_ratio: float,

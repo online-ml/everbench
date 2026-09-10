@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,7 +62,7 @@ def describe_objective(objective: Any) -> dict[str, Any]:
 
 
 def summarize_research(
-    observations: tuple[TemporalObservation, ...],
+    observations: Sequence[TemporalObservation],
     *,
     include_raw_examples: bool = False,
     max_examples: int = 12,
@@ -72,7 +72,8 @@ def summarize_research(
         raise ValueError("max_examples must be positive")
     first = observations[0]
     last = observations[-1]
-    positives = sum(int(bool(row.y)) for row in observations)
+    positive_counter = getattr(observations, "positive_count", None)
+    positives = int(positive_counter()) if callable(positive_counter) else sum(int(bool(row.y)) for row in observations)
     feature_types: dict[str, set[str]] = {}
 
     def record(value: Any, path: str, depth: int = 0) -> None:

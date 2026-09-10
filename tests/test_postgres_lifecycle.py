@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive, artifacts, event_store, model_store, reporting
 from everbench.auto import store as auto_store
+from everbench.auto.everbench import complete_observations, iter_complete_observations
 from everbench.config import CONFIG
 from everbench.db import make_session_factory
 from everbench.learner import learn_once
@@ -57,6 +58,47 @@ def sessions() -> Iterator[sessionmaker[Session]]:
 @pytest.fixture(autouse=True)
 def signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "postgres-test-signing-key")
+
+
+def test_complete_observations_streams_latest_cohort_in_event_order(
+    sessions: sessionmaker[Session],
+) -> None:
+    task_name = f"observation-stream-test-{uuid4()}"
+    start = datetime.now(UTC) - timedelta(days=3)
+    with sessions.begin() as session:
+        for index in range(5):
+            available_at = start + timedelta(seconds=index)
+            session.add(
+                BenchmarkEvent(
+                    task_name=task_name,
+                    event_id=str(index),
+                    sequence=index,
+                    event_time=available_at,
+                    event={"value": index},
+                    inserted_at=available_at,
+                )
+            )
+            session.add(
+                BenchmarkLabel(
+                    task_name=task_name,
+                    event_id=str(index),
+                    y=index % 2,
+                    reason="test",
+                    available_at=available_at + timedelta(seconds=1),
+                    inserted_at=available_at + timedelta(seconds=1),
+                )
+            )
+    task = cast(
+        TaskDefinition,
+        SimpleNamespace(TASK_NAME=task_name, NEGATIVE_LABEL_DELAY_SECONDS=None),
+    )
+
+    with sessions() as session:
+        streamed = tuple(iter_complete_observations(session, task, limit=3))
+        loaded = complete_observations(session, task, limit=3)
+
+    assert [row.observation_id for row in streamed] == ["2", "3", "4"]
+    assert loaded == streamed
 
 
 def test_archive_removes_predictions_before_events(

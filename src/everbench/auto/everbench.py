@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,19 +43,31 @@ def complete_observations(
     *,
     now: datetime | None = None,
 ) -> tuple[TemporalObservation, ...]:
-    """Load a recent event-time cohort whose labels have fully matured.
+    """Load a recent, fully mature cohort into memory."""
+    return tuple(iter_complete_observations(session, task, limit, maturity_margin_seconds, now=now))
+
+
+def iter_complete_observations(
+    session: Session,
+    task: TaskDefinition,
+    limit: int,
+    maturity_margin_seconds: float = 0.0,
+    *,
+    now: datetime | None = None,
+) -> Iterator[TemporalObservation]:
+    """Stream a recent event-time cohort whose labels have fully matured.
 
     For delayed-negative tasks, filtering on event time is essential. Merely
     selecting rows that already have labels would over-sample fast positives.
     """
     statement = (
         select(
-            BenchmarkEvent.event_id,
-            BenchmarkEvent.sequence,
-            BenchmarkEvent.event,
-            BenchmarkEvent.inserted_at,
-            BenchmarkLabel.y,
-            BenchmarkLabel.available_at,
+            BenchmarkEvent.event_id.label("event_id"),
+            BenchmarkEvent.sequence.label("sequence"),
+            BenchmarkEvent.event.label("event"),
+            BenchmarkEvent.inserted_at.label("event_available_at"),
+            BenchmarkLabel.y.label("y"),
+            BenchmarkLabel.available_at.label("label_available_at"),
         )
         .join(
             BenchmarkLabel,
@@ -68,24 +81,22 @@ def complete_observations(
             seconds=task.NEGATIVE_LABEL_DELAY_SECONDS + maturity_margin_seconds
         )
         statement = statement.where(BenchmarkEvent.event_time <= cutoff)
-    rows = session.execute(
-        statement.order_by(BenchmarkEvent.inserted_at.desc(), BenchmarkEvent.sequence.desc()).limit(limit)
-    ).all()
-    observations = []
-    for event_id, sequence, event, event_available_at, y, label_available_at in reversed(rows):
+    recent = (
+        statement.order_by(BenchmarkEvent.inserted_at.desc(), BenchmarkEvent.sequence.desc()).limit(limit).subquery()
+    )
+    ordered = select(recent).order_by(recent.c.event_available_at, recent.c.sequence)
+    rows = session.execute(ordered.execution_options(yield_per=500))
+    for event_id, sequence, event, event_available_at, y, label_available_at in rows:
         # Labels can enter the inbox before their event. Learning cannot happen
         # until both are available, so clamp to the event's availability time.
         effective_label_at = max(label_available_at, event_available_at)
         if not isinstance(event, dict):
             raise TypeError(f"event {event_id!r} is not a mapping")
-        observations.append(
-            TemporalObservation(
-                observation_id=event_id,
-                sequence=sequence,
-                x=event,
-                y=y,
-                available_at=event_available_at,
-                label_available_at=effective_label_at,
-            )
+        yield TemporalObservation(
+            observation_id=event_id,
+            sequence=sequence,
+            x=event,
+            y=y,
+            available_at=event_available_at,
+            label_available_at=effective_label_at,
         )
-    return tuple(observations)

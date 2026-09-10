@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import cloudpickle
 
-from everbench.auto.evaluation import evaluate_temporally
+from everbench.auto.dataset import PreparedTemporalSplit, prepared_temporal_actions
+from everbench.auto.evaluation import evaluate_temporal_actions, evaluate_temporally
 
 
 def _build(source: str):
@@ -33,24 +34,37 @@ def _build(source: str):
 
 def main(request_path: Path, result_path: Path) -> None:
     try:
-        request = cloudpickle.loads(request_path.read_bytes())
+        with request_path.open("rb") as request_file:
+            request = cloudpickle.load(request_file)
         model = _build(request["source"])
         if request["operation"] == "build":
             value = model
         elif request["operation"] == "evaluate":
-            value = evaluate_temporally(
-                request["champion"],
-                model,
-                request["split"],
-                request["objective"],
-                max_prediction_time_ratio=request["max_prediction_time_ratio"],
-            )
+            split = request["split"]
+            if isinstance(split, PreparedTemporalSplit):
+                value = evaluate_temporal_actions(
+                    request["champion"],
+                    model,
+                    prepared_temporal_actions(split),
+                    request["objective"],
+                    promotion_observations=len(split.promotion),
+                    max_prediction_time_ratio=request["max_prediction_time_ratio"],
+                )
+            else:
+                value = evaluate_temporally(
+                    request["champion"],
+                    model,
+                    split,
+                    request["objective"],
+                    max_prediction_time_ratio=request["max_prediction_time_ratio"],
+                )
         else:
             raise ValueError(f"unknown candidate operation: {request['operation']!r}")
         result = {"value": value}
     except BaseException as error:
         result = {"error": f"{type(error).__name__}: {error}\n{traceback.format_exc(limit=8)}"}
-    result_path.write_bytes(cloudpickle.dumps(result))
+    with result_path.open("wb") as result_file:
+        cloudpickle.dump(result, result_file)
 
 
 if __name__ == "__main__":

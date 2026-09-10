@@ -15,6 +15,7 @@ from everbench.auto.code_execution import (
     validate_candidate_source,
 )
 from everbench.auto.code_researcher import OpenAICodeResearcher, ResearchRequest
+from everbench.auto.dataset import PreparedTemporalData
 
 ENSEMBLE_SOURCE = """from river import compose, ensemble, linear_model
 
@@ -126,6 +127,42 @@ def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
         max_source_bytes=10_000,
         max_output_bytes=2_000_000,
     )
+
+    assert outcome.evaluation.observations == 3
+    assert outcome.checkpoint_event_sequence == 7
+
+
+def test_candidate_subprocess_streams_a_prepared_temporal_split() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = tuple(
+        TemporalObservation(
+            str(index),
+            index,
+            {"complete": {"nested": index}},
+            index % 2,
+            start + timedelta(seconds=index),
+            start + timedelta(seconds=index + 2),
+        )
+        for index in range(8)
+    )
+    champion = build_candidate_model(
+        ENSEMBLE_SOURCE,
+        timeout_seconds=10,
+        max_source_bytes=10_000,
+        max_output_bytes=2_000_000,
+    )
+
+    with PreparedTemporalData.from_observations(rows) as prepared:
+        outcome = evaluate_candidate_source(
+            ENSEMBLE_SOURCE,
+            champion,
+            prepared.split(promotion_observations=3, min_research_observations=5),
+            Objective(metrics.ROCAUC(), min_observations=3),
+            max_prediction_time_ratio=10.0,
+            timeout_seconds=10,
+            max_source_bytes=10_000,
+            max_output_bytes=2_000_000,
+        )
 
     assert outcome.evaluation.observations == 3
     assert outcome.checkpoint_event_sequence == 7

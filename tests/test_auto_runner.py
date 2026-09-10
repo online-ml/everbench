@@ -13,6 +13,7 @@ from everbench.auto import (
     temporal_split,
 )
 from everbench.auto.code_researcher import summarize_research
+from everbench.auto.dataset import PreparedTemporalData
 
 
 class LabelCountClassifier(base.Classifier):
@@ -62,6 +63,16 @@ def test_research_summary_requires_an_explicit_raw_example_opt_in() -> None:
     assert "raw_examples" not in summarize_research(rows)
     visible = summarize_research(rows, include_raw_examples=True, max_examples=2)
     assert [item["event"] for item in visible["raw_examples"]] == [{"value": 0}, {"value": 3}]
+
+    with PreparedTemporalData.from_observations(rows) as prepared:
+        prepared_visible = summarize_research(
+            prepared.split(promotion_observations=1).research,
+            include_raw_examples=True,
+            max_examples=2,
+        )
+
+    expected = summarize_research(rows[:-1], include_raw_examples=True, max_examples=2)
+    assert prepared_visible == expected
 
 
 def test_evaluation_preserves_delayed_feedback() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
@@ -90,13 +91,63 @@ def evaluate_temporally(
     label only at its historical availability time. Metrics are updated only for
     the sealed promotion cohort, while the research prefix acts as warm-up.
     """
-    champion = champion.clone()
-    candidate = candidate.clone()
     promotion_ids = {row.observation_id for row in split.promotion}
     rows = split.research + split.promotion
     ids = [row.observation_id for row in rows]
     if len(set(ids)) != len(ids):
         raise ValueError("observation IDs must be unique")
+
+    events = iter(sorted(rows, key=lambda row: (row.available_at, row.sequence)))
+    labels = iter(sorted(rows, key=lambda row: (row.label_available_at, row.sequence)))
+    return evaluate_temporal_actions(
+        champion,
+        candidate,
+        _merge_temporal_actions(events, labels, promotion_ids),
+        objective,
+        promotion_observations=len(split.promotion),
+        max_prediction_time_ratio=max_prediction_time_ratio,
+    )
+
+
+def _next_or_none(rows: Iterator[TemporalObservation]) -> TemporalObservation | None:
+    return next(rows, None)
+
+
+def _merge_temporal_actions(
+    events: Iterable[TemporalObservation],
+    labels: Iterable[TemporalObservation],
+    promotion_ids: set[str],
+) -> Iterable[tuple[int, TemporalObservation, bool]]:
+    """Merge event- and label-ordered rows without constructing a 2N timeline."""
+    event_iterator = iter(events)
+    label_iterator = iter(labels)
+    event = _next_or_none(event_iterator)
+    label = _next_or_none(label_iterator)
+    while event is not None or label is not None:
+        event_key = (event.available_at, 0, event.sequence) if event is not None else None
+        label_key = (label.label_available_at, 1, label.sequence) if label is not None else None
+        if label_key is None or (event_key is not None and event_key < label_key):
+            assert event is not None
+            yield 0, event, event.observation_id in promotion_ids
+            event = _next_or_none(event_iterator)
+        else:
+            assert label is not None
+            yield 1, label, label.observation_id in promotion_ids
+            label = _next_or_none(label_iterator)
+
+
+def evaluate_temporal_actions(
+    champion: base.Classifier,
+    candidate: base.Classifier,
+    actions: Iterable[tuple[int, TemporalObservation, bool]],
+    objective: Objective,
+    *,
+    promotion_observations: int,
+    max_prediction_time_ratio: float | None = None,
+) -> EvaluationOutcome:
+    """Evaluate an already causal action stream with bounded prediction state."""
+    champion = champion.clone()
+    candidate = candidate.clone()
 
     metric_definitions = (objective.metric,) + tuple(constraint.metric for constraint in objective.metric_constraints)
     champion_metrics = [metric.clone() for metric in metric_definitions]
@@ -104,13 +155,8 @@ def evaluate_temporally(
     predictions: dict[str, tuple[list[Any], list[Any]]] = {}
     candidate_predict_seconds = 0.0
     champion_predict_seconds = 0.0
-    timeline: list[tuple[datetime, int, int, TemporalObservation]] = []
-    for row in rows:
-        timeline.append((row.available_at, 0, row.sequence, row))
-        timeline.append((row.label_available_at, 1, row.sequence, row))
-
     last_label: tuple[datetime, int] | None = None
-    for _, action, _, row in sorted(timeline):
+    for action, row, is_promotion in actions:
         if action == 0:
             started = perf_counter()
             champion_predictions = _predictions(champion, metric_definitions, row.x)
@@ -118,11 +164,12 @@ def evaluate_temporally(
             started = perf_counter()
             candidate_predictions = _predictions(candidate, metric_definitions, row.x)
             candidate_predict_seconds += perf_counter() - started
-            predictions[row.observation_id] = (champion_predictions, candidate_predictions)
+            if is_promotion:
+                predictions[row.observation_id] = (champion_predictions, candidate_predictions)
             continue
 
-        champion_predictions, candidate_predictions = predictions.pop(row.observation_id)
-        if row.observation_id in promotion_ids:
+        if is_promotion:
+            champion_predictions, candidate_predictions = predictions.pop(row.observation_id)
             for metric, prediction in zip(champion_metrics, champion_predictions, strict=True):
                 metric.update(row.y, prediction)
             for metric, prediction in zip(candidate_metrics, candidate_predictions, strict=True):
@@ -155,7 +202,7 @@ def evaluate_temporally(
         evaluation=Evaluation(
             champion_score=champion_metrics[0].get(),
             candidate_score=candidate_metrics[0].get(),
-            observations=len(split.promotion),
+            observations=promotion_observations,
             constraints=constraints,
         ),
         trained_candidate=candidate,

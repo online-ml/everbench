@@ -23,8 +23,8 @@ from everbench.auto.code_researcher import (
     summarize_research,
 )
 from everbench.auto.config import AutoResearchConfig
-from everbench.auto.evaluation import temporal_split
-from everbench.auto.everbench import EverbenchAutoClassifier, complete_observations
+from everbench.auto.dataset import PreparedTemporalData
+from everbench.auto.everbench import EverbenchAutoClassifier, complete_observations, iter_complete_observations
 from everbench.auto.research import Candidate
 from everbench.config import CONFIG
 from everbench.heartbeat import Heartbeat
@@ -201,27 +201,61 @@ def _reflect_once(
 ) -> AutoRunReport:
     """Propose, causally evaluate, audit, and atomically promote one candidate."""
     config = _config(task)
-    with sessions() as session:
-        registration = model_store.model_registration(session, task.TASK_NAME, config.model_id)
-        if registration is None:
-            raise LookupError(f"auto model {config.model_id!r} is not bootstrapped")
-        auto_classifier, champion_artifact_id = _load_auto(session, registration)
-        current_source = _source_for_registration(session, registration)
-        registration_artifact_id = registration.artifact_id
-        if registration_artifact_id is None:
-            raise RuntimeError(f"auto model registration artifact missing for {config.model_id}")
-        observations = complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
-        recent = store.recent_experiments(session, task.TASK_NAME, config.model_id)
-        manifests = archive_store.task_archives(session, task.TASK_NAME) if config.retain_raw_examples else []
-    split = temporal_split(observations, config.promotion_observations, config.min_research_observations)
+    prepared: PreparedTemporalData | None = None
+    try:
+        with sessions() as session:
+            registration = model_store.model_registration(session, task.TASK_NAME, config.model_id)
+            if registration is None:
+                raise LookupError(f"auto model {config.model_id!r} is not bootstrapped")
+            auto_classifier, champion_artifact_id = _load_auto(session, registration)
+            current_source = _source_for_registration(session, registration)
+            registration_artifact_id = registration.artifact_id
+            if registration_artifact_id is None:
+                raise RuntimeError(f"auto model registration artifact missing for {config.model_id}")
+            prepared = PreparedTemporalData.from_observations(
+                iter_complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
+            )
+            recent = store.recent_experiments(session, task.TASK_NAME, config.model_id)
+            manifests = archive_store.task_archives(session, task.TASK_NAME) if config.retain_raw_examples else []
+        return _reflect_prepared_once(
+            sessions,
+            task,
+            config,
+            auto_classifier,
+            champion_artifact_id,
+            current_source,
+            registration_artifact_id,
+            prepared,
+            recent,
+            manifests,
+            researcher,
+        )
+    finally:
+        if prepared is not None:
+            prepared.close()
+
+
+def _reflect_prepared_once(
+    sessions: sessionmaker[Session],
+    task: TaskDefinition,
+    config: AutoResearchConfig,
+    auto_classifier: AutoClassifier,
+    champion_artifact_id: str,
+    current_source: str,
+    registration_artifact_id: str,
+    prepared: PreparedTemporalData,
+    recent: list[AutoExperiment],
+    manifests: list[Any],
+    researcher: Any | None,
+) -> AutoRunReport:
+    split = prepared.split(config.promotion_observations, config.min_research_observations)
     research_span = (split.research[-1].available_at - split.research[0].available_at).total_seconds()
     if research_span < config.min_research_span_seconds:
         raise NoNewPromotionEvidence(
             f"research history spans {research_span / 3_600:.1f}h; waiting for "
             f"{config.min_research_span_seconds / 3_600:.1f}h before causal evaluation"
         )
-    promotion_start = min(row.sequence for row in split.promotion)
-    promotion_end = max(row.sequence for row in split.promotion)
+    promotion_start, promotion_end = split.promotion.sequence_bounds()
     snapshot = auto_classifier.research_snapshot()
     summary = summarize_research(split.research, include_raw_examples=config.retain_raw_examples)
     for example in summary.get("raw_examples", []):
@@ -237,10 +271,10 @@ def _reflect_once(
         config.research_evaluation_observations,
         max(len(split.research) // 4, 1),
     )
-    inner_split = temporal_split(
-        split.research,
-        promotion_observations=inner_promotion_size,
-        min_research_observations=len(split.research) - inner_promotion_size,
+    inner_split = prepared.split(
+        inner_promotion_size,
+        len(split.research) - inner_promotion_size,
+        stop=len(split.research),
     )
     research_request = ResearchRequest(
         context=snapshot.context,
