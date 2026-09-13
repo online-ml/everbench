@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import date
 from pathlib import Path
 
 import click
@@ -11,8 +12,9 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 
 from alembic import command
-from everbench import artifacts, reporting
+from everbench import archive, archive_store, artifacts, reporting
 from everbench.collectors import collect_events, collect_labels
+from everbench.config import CONFIG
 from everbench.db import advisory_key, make_engine, make_session_factory
 from everbench.tasks import discover_tasks, load_task
 
@@ -153,6 +155,31 @@ def migrate() -> None:
                 connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
     finally:
         engine.dispose()
+
+
+@main.command("compact-archives")
+@click.argument("task_name")
+@click.argument("week_start", type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--target-rows", default=lambda: CONFIG.archive_batch_size, show_default=True, type=click.IntRange(min=1))
+@click.option("--apply", is_flag=True, help="Publish replacements and remove superseded shards.")
+def compact_archives(task_name: str, week_start, target_rows: int, apply: bool) -> None:
+    """Compact one UTC archive week into bounded Parquet shards."""
+    event_date: date = week_start.date()
+    sessions = make_session_factory()
+    with sessions() as session:
+        manifests = archive_store.archives_for_week(session, task_name, event_date)
+    row_count = sum(manifest.row_count for manifest in manifests)
+    target_files = (row_count + target_rows - 1) // target_rows
+    click.echo(
+        f"{task_name}/{event_date}: {len(manifests)} source files, {row_count:,} rows, {target_files} target files"
+    )
+    if not apply:
+        click.echo("dry run; pass --apply to compact")
+        return
+    result = archive.compact_archive_week(sessions, task_name, event_date, target_rows)
+    click.echo(
+        f"compacted {result.source_files} files into {result.replacement_files}; preserved {result.row_count:,} rows"
+    )
 
 
 @debug.command("collect-labels")

@@ -28,7 +28,9 @@ class RuntimeConfig:
     hot_event_max_bytes: int = 512 * 1024
     shutdown_flush_seconds: float = 20.0
     archive_after_days: int = 7
-    archive_batch_size: int = 10_000
+    # Match the backtest row limit so each archive is useful without producing
+    # an hourly stream of tiny files for high-volume tasks.
+    archive_batch_size: int = 100_000
     archive_interval_seconds: float = 3_600.0
     archive_root: Path | None = None
     s3_bucket_name: str | None = None

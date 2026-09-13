@@ -7,7 +7,8 @@ import io
 import json
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
@@ -23,6 +24,21 @@ from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
 from everbench.models import PickledModel, metric_inputs_for, prediction_for
 from everbench.tasks import TaskDefinition
+
+
+@dataclass(frozen=True)
+class PublishedArchive:
+    content_sha256: str
+    path: str
+    row_count: int
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class ArchiveCompaction:
+    source_files: int
+    replacement_files: int
+    row_count: int
 
 
 def storage_configured() -> bool:
@@ -105,6 +121,15 @@ def archive_size(location: str) -> int:
     return Path(location).stat().st_size
 
 
+def delete_archive(location: str) -> None:
+    """Delete a superseded archive object after its manifest has been replaced."""
+    if remote := _s3_location(location):
+        bucket, key = remote
+        _s3_client().delete_object(Bucket=bucket, Key=key)
+        return
+    Path(location).unlink(missing_ok=True)
+
+
 def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
     """Backtest an uploaded model against an archive.
 
@@ -184,6 +209,96 @@ def _record(row: dict) -> dict:
     }
 
 
+def _publish_records(task_name: str, week_start: date, records: list[dict]) -> PublishedArchive:
+    identity = {"task_name": task_name, "records": records}
+    content_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    buffer = io.BytesIO()
+    pq.write_table(pa.Table.from_pylist(records), buffer, compression="zstd")
+    location, byte_size = _publish(task_name, week_start.isoformat(), content_sha256, buffer.getvalue())
+    return PublishedArchive(content_sha256, location, len(records), byte_size)
+
+
+def _compaction_record(row: dict, fallback_sequence: int) -> dict:
+    """Normalize archives from every supported schema before combining them."""
+    return {
+        "event_id": row["event_id"],
+        "event_sequence": row.get("event_sequence", fallback_sequence),
+        "event_available_at": row["event_available_at"],
+        "payload_json": row.get("payload_json", row.get("features_json")),
+        "label": row["label"],
+        "label_reason": row.get("label_reason"),
+        "label_available_at": row["label_available_at"],
+    }
+
+
+def compact_archive_week(
+    sessions: sessionmaker[Session], task_name: str, week_start: date, target_rows: int
+) -> ArchiveCompaction:
+    """Replace a week's small immutable shards with validated, bounded shards."""
+    if target_rows <= 0:
+        raise ValueError("target_rows must be positive")
+    with sessions() as session:
+        manifests = archive_store.archives_for_week(session, task_name, week_start)
+    source_rows = sum(manifest.row_count for manifest in manifests)
+    expected_files = (source_rows + target_rows - 1) // target_rows
+    if len(manifests) <= 1 or expected_files >= len(manifests):
+        return ArchiveCompaction(len(manifests), len(manifests), source_rows)
+
+    replacements: list[PublishedArchive] = []
+    pending: list[dict] = []
+    seen_event_ids: set[str] = set()
+    fallback_sequence = 0
+
+    def publish_pending(row_count: int) -> None:
+        records = pending[:row_count]
+        del pending[:row_count]
+        replacement = _publish_records(task_name, week_start, records)
+        parquet = pq.ParquetFile(pa.BufferReader(read_archive(replacement.path)))
+        if parquet.metadata.num_rows != replacement.row_count:
+            raise RuntimeError(f"replacement archive {replacement.content_sha256} failed row-count validation")
+        replacements.append(replacement)
+
+    for manifest in manifests:
+        parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
+        actual_rows = 0
+        for batch in parquet.iter_batches():
+            for row in batch.to_pylist():
+                record = _compaction_record(row, fallback_sequence)
+                fallback_sequence += 1
+                event_id = record["event_id"]
+                if event_id in seen_event_ids:
+                    raise RuntimeError(f"duplicate event {event_id!r} in archive week {week_start}")
+                seen_event_ids.add(event_id)
+                pending.append(record)
+                actual_rows += 1
+                if len(pending) == target_rows:
+                    publish_pending(target_rows)
+        if actual_rows != manifest.row_count:
+            raise RuntimeError(
+                f"archive {manifest.content_sha256} contains {actual_rows} rows; manifest says {manifest.row_count}"
+            )
+    if pending:
+        publish_pending(len(pending))
+    if sum(replacement.row_count for replacement in replacements) != source_rows:
+        raise RuntimeError("replacement archives do not preserve the source row count")
+
+    old_hashes = [manifest.content_sha256 for manifest in manifests]
+    with sessions.begin() as session:
+        archive_store.replace_archive_manifests(session, task_name, week_start, old_hashes, replacements)
+
+    replacement_paths = {replacement.path for replacement in replacements}
+    for manifest in manifests:
+        if manifest.path not in replacement_paths:
+            delete_archive(manifest.path)
+    return ArchiveCompaction(len(manifests), len(replacements), source_rows)
+
+
+def archive_batch_ready(week_start: date, cutoff: datetime, row_count: int, batch_size: int) -> bool:
+    """Publish full batches immediately and partial batches once their week is closed."""
+    week_end = datetime.combine(week_start + timedelta(days=7), time.min, UTC)
+    return row_count >= batch_size or cutoff >= week_end
+
+
 def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """Archive one eligible weekly partition batch, returning its event count.
 
@@ -198,19 +313,30 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
         week_start = archive_store.next_archive_week(session, task.TASK_NAME, cutoff)
         if week_start is None:
             return 0
+        row_count = archive_store.archive_row_count(
+            session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size
+        )
+        if not archive_batch_ready(week_start, cutoff, row_count, CONFIG.archive_batch_size):
+            return 0
         rows = archive_store.archive_rows(session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size)
     if not rows:
         return 0
+    # A concurrent compactor may have removed rows between the count and read.
+    # Do not turn that race into another partial archive for an open week.
+    if not archive_batch_ready(week_start, cutoff, len(rows), CONFIG.archive_batch_size):
+        return 0
     records = [_record(row) for row in rows]
-    identity = {"task_name": task.TASK_NAME, "records": records}
-    content_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    buffer = io.BytesIO()
-    pq.write_table(pa.Table.from_pylist(records), buffer, compression="zstd")
-    location, byte_size = _publish(task.TASK_NAME, week_start.isoformat(), content_sha256, buffer.getvalue())
+    published = _publish_records(task.TASK_NAME, week_start, records)
     event_ids = [record["event_id"] for record in records]
     with sessions.begin() as session:
         archive_store.record_archive(
-            session, content_sha256, task.TASK_NAME, week_start, location, len(records), byte_size
+            session,
+            published.content_sha256,
+            task.TASK_NAME,
+            week_start,
+            published.path,
+            published.row_count,
+            published.byte_size,
         )
         # The manifest commits with the delete, and only after the immutable
         # file was atomically published. A failed cycle leaves source rows for

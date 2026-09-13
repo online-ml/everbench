@@ -60,9 +60,38 @@ def test_task_dashboard_identifies_archive_downloads_by_filename(
     response = client.get("/tasks/dummy")
 
     assert response.status_code == 200
+    assert "week of 2026-08-31 · 42 records · 1 file · 2 KB" in response.text
     assert ">dummy-2026-08-31-abc123def456.parquet · 42 records · 2 KB</a>" in response.text
     assert path not in response.text
-    assert "week of" not in response.text
+
+
+def test_task_dashboard_groups_archive_shards_by_week(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        archive_store,
+        "task_archives",
+        lambda session, task_name: [
+            SimpleNamespace(
+                path="first.parquet",
+                event_date=date(2026, 8, 31),
+                content_sha256="first",
+                row_count=60,
+                byte_size=1024,
+            ),
+            SimpleNamespace(
+                path="second.parquet",
+                event_date=date(2026, 8, 31),
+                content_sha256="second",
+                row_count=40,
+                byte_size=2048,
+            ),
+        ],
+    )
+
+    response = client.get("/tasks/dummy")
+
+    assert response.status_code == 200
+    assert "week of 2026-08-31 · 100 records · 2 files · 3 KB" in response.text
+    assert response.text.count('<details class="archive-group">') == 1
 
 
 def test_task_panel_is_not_cached(client: FlaskClient) -> None:
