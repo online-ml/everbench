@@ -315,13 +315,24 @@ def test_auto_model_detail_updates_from_research_without_changing_champion(sessi
             artifacts.sign(payload),
             {"source": "auto-bootstrap", "generation": 0, "source_code": source},
         )
-        model_store.register_model(session, task_name, "auto", "test", artifact.artifact_id)
+        model_store.register_model(session, task_name, "auto", "everbench-auto", artifact.artifact_id)
+        model_store.save_pickle_snapshot(session, task_name, "auto", payload, None, None, None)
 
     with sessions() as session:
         detail = reporting.model_detail(session, task_name, "auto")
         assert detail is not None
         assert "generation 0" in detail["class_definition"]
         assert "No research rounds have run yet" in detail["class_definition"]
+        champion = model_store.artifact(session, artifact.artifact_id)
+        assert champion is not None
+        assert champion.metadata_["source"] == "auto-bootstrap"
+
+    # Artifacts checkpointed before source metadata was preserved still carry
+    # enough ownership and generation metadata to be recognized as autonomous.
+    with sessions.begin() as session:
+        champion = model_store.artifact(session, artifact.artifact_id)
+        assert champion is not None
+        champion.metadata_ = {**champion.metadata_, "source": "worker-snapshot"}
 
     with sessions.begin() as session:
         experiment = auto_store.begin_experiment(
@@ -358,6 +369,7 @@ def test_auto_model_detail_updates_from_research_without_changing_champion(sessi
         assert detail["class_definition"].endswith(source)
         champion = model_store.artifact(session, artifact.artifact_id)
         assert champion is not None
+        assert champion.metadata_["source"] == "worker-snapshot"
         assert champion.metadata_["source_code"] == source
 
 

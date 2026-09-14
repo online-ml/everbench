@@ -130,7 +130,10 @@ def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, A
         return None
     detail = dict(row)
     metadata = detail.pop("artifact_metadata") or {}
-    if metadata.get("source") in {"auto-bootstrap", "auto-promotion"}:
+    is_auto_artifact = metadata.get("source") in {"auto-bootstrap", "auto-promotion"} or (
+        detail["owner"] == "everbench-auto" and "generation" in metadata and "source_code" in metadata
+    )
+    if is_auto_artifact:
         counts = {
             status: count
             for status, count in session.execute(

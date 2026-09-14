@@ -428,7 +428,14 @@ def save_pickle_snapshot(
             ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id
         )
     )
-    artifact_record = store_artifact(session, payload, artifacts.sign(payload), {"source": "worker-snapshot"})
+    # A checkpoint may be byte-identical to the registered champion (notably
+    # immediately after an auto bootstrap). Keep the champion's descriptive
+    # metadata in that case; the snapshot role is already represented by the
+    # model_snapshots row.
+    artifact_record = store_artifact(session, payload, artifacts.sign(payload), {})
+    snapshot_metadata = dict(artifact_record.metadata_ or {})
+    snapshot_metadata.setdefault("source", "worker-snapshot")
+    artifact_record.metadata_ = snapshot_metadata
     statement = (
         insert(ModelSnapshot)
         .values(
