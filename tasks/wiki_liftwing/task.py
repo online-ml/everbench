@@ -29,11 +29,11 @@ NEGATIVE_LABEL_DELAY_SECONDS = 48 * 60 * 60
 AUTO_RESEARCH = AutoResearchConfig(
     model_id="auto-river",
     owner="everbench-auto",
-    candidate_path=Path(__file__).with_name("auto") / "candidate.py",
+    seed_path=Path(__file__).with_name("auto") / "candidate.py",
     objective=Objective(
         metrics.ROCAUC(),
         min_improvement=0.01,
-        min_observations=50_000,
+        min_observations=100_000,
         required_constraints=("prediction_time_ratio", "serialized_model_size"),
         metric_constraints=(MetricConstraint("log_loss_non_regression", metrics.LogLoss(), 0.01),),
     ),
@@ -48,17 +48,12 @@ AUTO_RESEARCH = AutoResearchConfig(
             "Logged-out editors may use temporary account names beginning with a tilde.",
         ],
     },
-    # The stream currently produces roughly 4,500 eligible edits/hour. A
-    # 50,000-row default would cover only about 12 hours and could never expose
-    # delayed feedback to a fresh model before promotion predictions begin.
-    history_limit=300_000,
-    promotion_observations=50_000,
-    research_evaluation_observations=25_000,
+    min_archive_observations=100_000,
+    # Explore several complete model programs in the single weekly run.
+    candidate_budget_per_week=6,
     # Leave 50% growth headroom below the 32 MiB operational checkpoint
     # ceiling. Stateful candidates must remain bounded after promotion.
     max_candidate_model_bytes=16 * 1024 * 1024,
-    min_research_span_seconds=48 * 60 * 60,
-    retain_raw_examples=True,
 )
 
 

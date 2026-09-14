@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from river import base, metrics
 
 from everbench.auto import (
+    ArchiveExample,
     Objective,
-    TemporalObservation,
-    evaluate_temporally,
-    temporal_split,
+    progressive_validate,
 )
 from everbench.auto.code_researcher import summarize_research
-from everbench.auto.dataset import PreparedTemporalData
+from everbench.auto.dataset import ArchiveWeek
 from everbench.auto.service import _with_model_size_constraint
+from everbench.schema import ArchiveManifest
 
 
 class LabelCountClassifier(base.Classifier):
@@ -34,54 +37,73 @@ class LabelCountClassifier(base.Classifier):
         self.learned += 1
 
 
-def observations(count: int = 6) -> tuple[TemporalObservation, ...]:
+def observations(count: int = 6) -> tuple[ArchiveExample, ...]:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     return tuple(
-        TemporalObservation(
-            observation_id=str(index),
-            sequence=index,
-            x={"value": index},
-            y=1,
-            available_at=start + timedelta(seconds=index),
-            label_available_at=start + timedelta(seconds=index + 10),
+        (
+            str(index),
+            index,
+            {"value": index},
+            1,
+            start + timedelta(seconds=index),
+            start + timedelta(seconds=index + 10),
         )
         for index in range(count)
     )
 
 
-def test_temporal_split_reserves_the_latest_event_cohort() -> None:
-    split = temporal_split(tuple(reversed(observations())), promotion_observations=2, min_research_observations=3)
+def _archive(path: Path, rows: list[dict[str, Any]], suffix: str) -> ArchiveManifest:
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    return ArchiveManifest(
+        content_sha256=suffix * 64,
+        task_name="test",
+        event_date=date(2026, 1, 5),
+        path=str(path),
+        row_count=len(rows),
+        byte_size=path.stat().st_size,
+    )
 
-    assert [row.observation_id for row in split.research] == ["0", "1", "2", "3"]
-    assert [row.observation_id for row in split.promotion] == ["4", "5"]
 
-    with pytest.raises(ValueError, match="at least 7 complete observations"):
-        temporal_split(observations(), promotion_observations=4, min_research_observations=3)
+def test_archive_week_clamps_labels_that_arrived_before_the_event(tmp_path: Path) -> None:
+    later = {
+        "event_id": "later",
+        "event_sequence": 2,
+        "event_available_at": "2026-01-05T00:00:02+00:00",
+        "payload_json": '{"value":2}',
+        "label": 0,
+        "label_available_at": "2026-01-05T00:00:03+00:00",
+    }
+    earlier = {
+        "event_id": "earlier",
+        "event_sequence": 1,
+        "event_available_at": "2026-01-05T00:00:01+00:00",
+        "payload_json": '{"value":1}',
+        "label": 1,
+        # Inbox labels may precede their matching event.
+        "label_available_at": "2026-01-05T00:00:00+00:00",
+    }
+    manifest = _archive(tmp_path / "week.parquet", [earlier, later], "a")
+
+    with ArchiveWeek.open(manifest) as prepared:
+        rows = tuple(prepared)
+
+    assert [row[0] for row in rows] == ["earlier", "later"]
+    assert rows[0][5] == rows[0][4]
 
 
-def test_research_summary_requires_an_explicit_raw_example_opt_in() -> None:
+def test_research_summary_never_copies_raw_examples() -> None:
     rows = observations()
 
-    assert "raw_examples" not in summarize_research(rows)
-    visible = summarize_research(rows, include_raw_examples=True, max_examples=2)
-    assert [item["event"] for item in visible["raw_examples"]] == [{"value": 0}, {"value": 3}]
-
-    with PreparedTemporalData.from_observations(rows) as prepared:
-        prepared_visible = summarize_research(
-            prepared.split(promotion_observations=1).research,
-            include_raw_examples=True,
-            max_examples=2,
-        )
-
-    expected = summarize_research(rows[:-1], include_raw_examples=True, max_examples=2)
-    assert prepared_visible == expected
+    summary = summarize_research(rows)
+    assert "raw_examples" not in summary
+    assert summary["payload_schema"] == {"$": ["dict"], "value": ["int"]}
 
 
 def test_evaluation_preserves_delayed_feedback() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = (
-        TemporalObservation("research", 1, {}, 1, start, start + timedelta(seconds=3)),
-        TemporalObservation(
+        ("research", 1, {}, 1, start, start + timedelta(seconds=3)),
+        (
             "promotion",
             2,
             {},
@@ -90,12 +112,10 @@ def test_evaluation_preserves_delayed_feedback() -> None:
             start + timedelta(seconds=4),
         ),
     )
-    split = temporal_split(rows, promotion_observations=1)
-
-    outcome = evaluate_temporally(
+    outcome = progressive_validate(
         LabelCountClassifier(),
         LabelCountClassifier(),
-        split,
+        rows,
         Objective(metrics.LogLoss()),
     )
 
@@ -110,10 +130,10 @@ def test_serialized_model_size_is_required_promotion_evidence() -> None:
         metrics.Accuracy(),
         required_constraints=("serialized_model_size",),
     )
-    outcome = evaluate_temporally(
+    outcome = progressive_validate(
         LabelCountClassifier(),
         LabelCountClassifier(),
-        temporal_split(observations(), promotion_observations=2),
+        observations(),
         objective,
     )
     outcome = replace(

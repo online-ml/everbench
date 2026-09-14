@@ -29,7 +29,7 @@ def sqlalchemy_url(url: str | None = None) -> str:
 
 def make_engine(url: str | None = None) -> Engine:
     # Each Railway worker is single-process. Keep enough connections for its
-    # collectors, compactor, heartbeat, and connection-pinned learners.
+    # collectors, archiver, heartbeat, and connection-pinned learners.
     return create_engine(
         sqlalchemy_url(url),
         pool_pre_ping=True,

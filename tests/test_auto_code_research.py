@@ -5,17 +5,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from river import compose, ensemble, metrics
 
-from everbench.auto import Objective, TemporalObservation, temporal_split
+from everbench.auto import Objective
 from everbench.auto.code_execution import (
     build_candidate_model,
     evaluate_candidate_source,
     validate_candidate_source,
 )
 from everbench.auto.code_researcher import OpenAICodeResearcher, ResearchRequest
-from everbench.auto.dataset import PreparedTemporalData
+from everbench.auto.dataset import ArchiveWeek
 
 ENSEMBLE_SOURCE = """from river import compose, ensemble, linear_model
 
@@ -99,10 +101,18 @@ def test_candidate_program_cannot_access_system_or_files() -> None:
         validate_candidate_source("def build_model():\n    return open('/etc/passwd')", 10_000)
 
 
+def test_candidate_program_cannot_use_models_that_retain_examples() -> None:
+    with pytest.raises(ValueError, match="retain training examples"):
+        validate_candidate_source(
+            "from river import neighbors\ndef build_model(): return neighbors.KNNClassifier()",
+            10_000,
+        )
+
+
 def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = tuple(
-        TemporalObservation(
+        (
             str(index),
             index,
             {"complete": {"nested": index}},
@@ -120,7 +130,7 @@ def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
             max_source_bytes=10_000,
             max_output_bytes=2_000_000,
         ),
-        temporal_split(rows, promotion_observations=3, min_research_observations=5),
+        rows,
         Objective(metrics.ROCAUC(), min_observations=3),
         max_prediction_time_ratio=10.0,
         timeout_seconds=10,
@@ -128,14 +138,14 @@ def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
         max_output_bytes=2_000_000,
     )
 
-    assert outcome.evaluation.observations == 3
+    assert outcome.evaluation.observations == 8
     assert outcome.checkpoint_event_sequence == 7
 
 
-def test_candidate_subprocess_streams_a_prepared_temporal_split() -> None:
+def test_candidate_subprocess_streams_a_prepared_archive_week(tmp_path: Path) -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = tuple(
-        TemporalObservation(
+        (
             str(index),
             index,
             {"complete": {"nested": index}},
@@ -151,12 +161,29 @@ def test_candidate_subprocess_streams_a_prepared_temporal_split() -> None:
         max_source_bytes=10_000,
         max_output_bytes=2_000_000,
     )
+    path = tmp_path / "week.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "event_id": row[0],
+                    "event_sequence": row[1],
+                    "payload_json": __import__("json").dumps(row[2]),
+                    "label": row[3],
+                    "event_available_at": row[4].isoformat(),
+                    "label_available_at": row[5].isoformat(),
+                }
+                for row in rows
+            ]
+        ),
+        path,
+    )
 
-    with PreparedTemporalData.from_observations(rows) as prepared:
+    with ArchiveWeek(path, len(rows)) as prepared:
         outcome = evaluate_candidate_source(
             ENSEMBLE_SOURCE,
             champion,
-            prepared.split(promotion_observations=3, min_research_observations=5),
+            prepared,
             Objective(metrics.ROCAUC(), min_observations=3),
             max_prediction_time_ratio=10.0,
             timeout_seconds=10,
@@ -164,7 +191,7 @@ def test_candidate_subprocess_streams_a_prepared_temporal_split() -> None:
             max_output_bytes=2_000_000,
         )
 
-    assert outcome.evaluation.observations == 3
+    assert outcome.evaluation.observations == 8
     assert outcome.checkpoint_event_sequence == 7
 
 
@@ -190,12 +217,12 @@ class FakeResponses:
 
 def test_code_researcher_edits_evaluates_and_freezes_source() -> None:
     responses = FakeResponses()
-    researcher = OpenAICodeResearcher(client=SimpleNamespace(responses=responses), max_experiments=2)
+    researcher = OpenAICodeResearcher(client=SimpleNamespace(responses=responses), candidate_budget=2)
     request = ResearchRequest(
         context={"problem_description": "test"},
         research_summary={"observations": 100, "payload_schema": {"nested.value": ["int"]}},
         objective={"primary_metric": "ROCAUC"},
-        current_source="from river import dummy\ndef build_model(): return dummy.PriorClassifier()",
+        champion_source="from river import dummy\ndef build_model(): return dummy.PriorClassifier()",
     )
     evaluated: list[str] = []
 
@@ -228,7 +255,7 @@ def test_code_researcher_prefers_a_constraint_passing_candidate() -> None:
         ),
         SimpleNamespace(type="function_call", name="finish", call_id="finish", arguments="{}"),
     ]
-    researcher = OpenAICodeResearcher(client=SimpleNamespace(responses=responses), max_experiments=3)
+    researcher = OpenAICodeResearcher(client=SimpleNamespace(responses=responses), candidate_budget=3)
     request = ResearchRequest({}, {"primary_metric": "ROCAUC"}, {}, ENSEMBLE_SOURCE)
 
     proposal = researcher.research(

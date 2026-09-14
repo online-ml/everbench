@@ -10,32 +10,44 @@ The predictor currently responsible for serving predictions and learning from ob
 _Avoid_: Current model, production model
 
 **Candidate**:
-A proposed successor to a champion, frozen before its promotion evidence is collected.
+A proposed successor to a champion, compared from a fresh state on an archive week.
 _Avoid_: Experiment model, new model
 
 **Candidate program**:
-The complete editable Python program that constructs a candidate. Its interface is fixed, but its feature extraction,
-online models, hyperparameters, drift logic, ensembles, and stacking are not restricted.
+The immutable source and hyperparameters that construct a fresh, untrained candidate. Learned state and observations
+are not part of the candidate program.
 _Avoid_: Search configuration, bounded model space
 
-**Research history**:
-Observations and prediction outcomes that a research agent is permitted to inspect.
-_Avoid_: Training data, archive
+**Archive week**:
+One immutable Parquet file containing every observation made available during one UTC week. It is the common offline
+corpus used to compare fresh champion and candidate instances.
+_Avoid_: Archive shard, research history
 
-**Promotion evidence**:
-Measurements collected without exposing their underlying observations to the research agent before a candidate is
-frozen.
-_Avoid_: Test data, validation score
+**Serving state**:
+Bounded learned parameters and sufficient statistics used by a champion while serving and learning. It excludes
+observations and raw payload identifiers.
+_Avoid_: Model data, training history
+
+**Model snapshot**:
+A durable checkpoint of serving state used for restart recovery. It is not a source of offline research observations.
+_Avoid_: Model artifact, training archive
+
+**Weekly comparison**:
+Measurements produced by replaying one archive week causally through fresh champion and candidate instances. The
+research agent may iterate on this same corpus; River's delayed progressive validation defines the replay semantics.
+It is not a separate holdout.
+_Avoid_: Sealed cohort, live score
 
 **Research evaluation**:
-Repeatable causal measurements visible to the research agent while it edits a candidate program. Research evaluation
-is disjoint from promotion evidence.
-_Avoid_: Promotion run, production score
+Repeatable causal measurements produced by replaying the same archive week through fresh champion and candidate
+instances while the agent edits a candidate program.
+_Avoid_: Production score, live evaluation
 
 **Objective**:
 The owner-defined, agent-immutable criteria that determine whether a candidate may replace a champion.
 _Avoid_: Reward, agent goal
 
 **Reflection**:
-One bounded attempt to use research history and owner context to propose and evaluate a candidate.
+One weekly research session that uses an archive week and owner context to evaluate a configured budget of candidate
+programs, then selects at most one for promotion.
 _Avoid_: Self-edit, retraining

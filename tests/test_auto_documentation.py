@@ -70,7 +70,7 @@ def test_research_notes_distinguish_active_rejected_failed_and_promoted_rounds()
     assert "test-researcher is exploring candidates against generation 2" in result
     assert "Try a larger ensemble" in result
     assert "champion 0.400000, candidate 0.300000" in result
-    assert "+0.100000 on 2,000 sealed observations" in " ".join(result.split())
+    assert "+0.100000 on 2,000 archived observations" in " ".join(result.split())
     assert "Failed constraint latency: too slow" in result
     assert "ValueError: invalid candidate" in result
     assert "promoted, generation 2 → 3" in result

@@ -32,7 +32,7 @@ def documented_source(
         lines.append(fill(value, width=88, initial_indent=indent, subsequent_indent=indent))
 
     hypothesis = metadata.get("hypothesis")
-    note(hypothesis or "Initial model, pre-trained on mature historical observations; no promoted changes yet.")
+    note(hypothesis or "Initial model, trained on a completed archive week; no promoted changes yet.")
     if not experiments:
         lines.extend(["", "No research rounds have run yet."])
     else:
@@ -41,7 +41,7 @@ def documented_source(
         if latest.status == "running":
             note(
                 f"{latest.researcher} is exploring candidates against generation {latest.parent_generation}. "
-                "The selected hypothesis and sealed evaluation will appear when the round finishes."
+                "The selected hypothesis and weekly comparison will appear when the round finishes."
             )
         else:
             note("No research round is currently running. The latest completed attempts are listed below.")
@@ -60,7 +60,7 @@ def documented_source(
                     f"{evaluation['metric']}: champion {evaluation['champion_score']:.6f}, "
                     f"candidate {evaluation['candidate_score']:.6f}; "
                     f"improvement {evaluation['improvement']:+.6f} "
-                    f"on {evaluation['observations']:,} sealed observations.",
+                    f"on {evaluation['observations']:,} archived observations.",
                     "    ",
                 )
                 failed = [item for item in evaluation.get("constraints", []) if not item["passed"]]
@@ -73,8 +73,8 @@ def documented_source(
         lines.extend(
             [
                 "",
-                "Scores compare candidates with their then-current champion on each round's",
-                "sealed cohort; they are not live leaderboard scores. Positive improvement",
+                "Scores compare fresh candidates with a fresh instance of their then-current",
+                "champion on the same archive week; they are not live leaderboard scores. Positive improvement",
                 "means better. A promoted hypothesis passed that round's promotion checks.",
             ]
         )

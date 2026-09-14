@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import copy
-from collections import deque
 from typing import Any
 
 from river import base
 
-from everbench.auto.research import Candidate, Evaluation, Objective, Observation, ResearchSnapshot
+from everbench.auto.research import Candidate, Evaluation, Objective
 
 
 class AutoClassifier(base.Classifier):
-    """Wrap a River classifier with research snapshots and guarded promotion.
+    """Wrap a serving classifier with an objective and guarded promotion.
 
-    This class never invokes an agent, starts background work, or retains raw
-    observations unless a positive history capacity is explicitly supplied. An external
-    runner is responsible for proposing candidates and collecting sealed
-    evaluation evidence.
+    This class never invokes an agent, starts background work, or retains a
+    research dataset. The external runner gets research observations from
+    immutable archives.
 
     Parameters
     ----------
@@ -26,9 +24,6 @@ class AutoClassifier(base.Classifier):
     objective
         Owner-defined promotion criteria. The contained metric is cloned before
         use so callers and research snapshots cannot alter the live objective.
-    history_capacity
-        Number of recent raw observations to retain in memory and in pickles.
-        Zero, the default, retains nothing.
     context
         Optional problem description or arbitrary structured context supplied
         to the research agent. It is copied at initialization and snapshot time.
@@ -38,11 +33,8 @@ class AutoClassifier(base.Classifier):
         self,
         model: base.Classifier,
         objective: Objective,
-        history_capacity: int = 0,
         context: Any = None,
     ) -> None:
-        if history_capacity < 0:
-            raise ValueError("history_capacity cannot be negative")
         if not objective.metric.works_with(model):
             raise ValueError(f"{type(objective.metric).__name__} does not work with {type(model).__name__}")
         incompatible = [
@@ -54,12 +46,9 @@ class AutoClassifier(base.Classifier):
             raise ValueError(f"secondary metrics do not work with {type(model).__name__}: {', '.join(incompatible)}")
         self.model = model
         self._objective = objective.copy()
-        self.history_capacity = history_capacity
-        self._history: deque[Observation] | None = deque(maxlen=history_capacity) if history_capacity else None
         self._context = copy.deepcopy(context)
         self._metric = self._objective.fresh_metric()
         self._generation = 0
-        self._observations_seen = 0
 
     @property
     def objective(self) -> Objective:
@@ -99,35 +88,19 @@ class AutoClassifier(base.Classifier):
         self.model.learn_one(x, y, **kwargs)
         weight = kwargs.get("w", 1.0)
         self._metric.update(y, prediction, w=weight)
-        self._observations_seen += 1
-        if self._history is not None:
-            self._history.append(
-                copy.deepcopy(
-                    Observation(
-                        sequence=self._observations_seen,
-                        x=x,
-                        y=y,
-                        prediction=prediction,
-                        learn_kwargs=kwargs,
-                    )
-                )
-            )
 
-    def research_snapshot(self) -> ResearchSnapshot:
-        """Return detached state that an external runner may expose to an agent."""
-        history = copy.deepcopy(tuple(self._history)) if self._history is not None else ()
-        return ResearchSnapshot(
-            champion=self.model.clone(include_attributes=True),
-            generation=self._generation,
-            observations_seen=self._observations_seen,
-            current_score=self.score,
-            objective=self.objective,
-            history=history,
-            context=self.context,
-        )
+    def __getstate__(self) -> dict[str, Any]:
+        """Persist only serving state; research observations belong to archives."""
+        return {
+            "model": self.model,
+            "_objective": self._objective,
+            "_context": self._context,
+            "_metric": self._metric,
+            "_generation": self._generation,
+        }
 
     def consider(self, candidate: Candidate, evaluation: Evaluation) -> bool:
-        """Promote a candidate when fresh sealed evidence satisfies the objective."""
+        """Promote a candidate when its weekly comparison satisfies the objective."""
         if candidate.parent_generation != self._generation:
             raise ValueError(
                 f"candidate targets generation {candidate.parent_generation}, current generation is {self._generation}"

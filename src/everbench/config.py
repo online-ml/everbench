@@ -28,9 +28,6 @@ class RuntimeConfig:
     hot_event_max_bytes: int = 512 * 1024
     shutdown_flush_seconds: float = 20.0
     archive_after_days: int = 7
-    # Match the backtest row limit so each archive is useful without producing
-    # an hourly stream of tiny files for high-volume tasks.
-    archive_batch_size: int = 100_000
     archive_interval_seconds: float = 3_600.0
     archive_root: Path | None = None
     s3_bucket_name: str | None = None
@@ -63,7 +60,6 @@ class RuntimeConfig:
             "hot_event_capacity": self.hot_event_capacity,
             "hot_event_max_bytes": self.hot_event_max_bytes,
             "shutdown_flush_seconds": self.shutdown_flush_seconds,
-            "archive_batch_size": self.archive_batch_size,
             "archive_interval_seconds": self.archive_interval_seconds,
             "max_model_bytes": self.max_model_bytes,
             "max_class_definition_bytes": self.max_class_definition_bytes,
@@ -102,7 +98,6 @@ class RuntimeConfig:
             hot_event_max_bytes=_int("EVERBENCH_HOT_EVENT_MAX_BYTES", defaults.hot_event_max_bytes),
             shutdown_flush_seconds=_float("EVERBENCH_SHUTDOWN_FLUSH_SECONDS", defaults.shutdown_flush_seconds),
             archive_after_days=_int("EVERBENCH_ARCHIVE_AFTER_DAYS", defaults.archive_after_days),
-            archive_batch_size=_int("EVERBENCH_ARCHIVE_BATCH_SIZE", defaults.archive_batch_size),
             archive_interval_seconds=_float("EVERBENCH_ARCHIVE_INTERVAL_SECONDS", defaults.archive_interval_seconds),
             archive_root=Path(value) if (value := os.getenv("EVERBENCH_ARCHIVE_ROOT")) else None,
             s3_bucket_name=os.getenv("S3_BUCKET_NAME"),

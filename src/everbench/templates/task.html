@@ -12,19 +12,12 @@
   </dialog>
   <section>
     <h2>Archives</h2>
-    {% if archive_groups %}
-      <div class="archive-groups">
-        {% for group in archive_groups %}
-          <details class="archive-group">
-            <summary>week of {{ group.event_date.isoformat() }} · {{ group.row_count|number }} records · {{ group.archives|length }} {{ "file" if group.archives|length == 1 else "files" }}{% if group.byte_size is not none %} · {{ group.byte_size|file_size }}{% endif %}</summary>
-            <ul class="archive-list">
-              {% for archive in group.archives %}
-                <li><a href="{{ url_for('download_archive', task_name=task_name, content_sha256=archive.content_sha256) }}">{{ archive_download_name(task_name, archive) }} · {{ archive.row_count|number }} records · {{ archive.byte_size|file_size if archive.byte_size is not none else archive.path|file_size }}</a></li>
-              {% endfor %}
-            </ul>
-          </details>
+    {% if archives %}
+      <ul class="archive-list">
+        {% for archive in archives %}
+          <li>week of {{ archive.event_date.isoformat() }} · <a href="{{ url_for('download_archive', task_name=task_name, content_sha256=archive.content_sha256) }}">{{ archive_download_name(task_name, archive) }}</a> · {{ archive.row_count|number }} records · {{ archive.byte_size|file_size if archive.byte_size is not none else archive.path|file_size }}</li>
         {% endfor %}
-      </div>
+      </ul>
     {% else %}
       <p class="muted">No archives are available for this task.</p>
     {% endif %}

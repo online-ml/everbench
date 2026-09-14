@@ -10,8 +10,7 @@ from uuid import uuid4
 
 import cloudpickle
 
-from everbench.auto.dataset import PreparedTemporalSplit, prepared_temporal_actions
-from everbench.auto.evaluation import evaluate_temporal_actions, evaluate_temporally
+from everbench.auto.evaluation import progressive_validate
 
 
 def _build(source: str):
@@ -40,24 +39,13 @@ def main(request_path: Path, result_path: Path) -> None:
         if request["operation"] == "build":
             value = model
         elif request["operation"] == "evaluate":
-            split = request["split"]
-            if isinstance(split, PreparedTemporalSplit):
-                value = evaluate_temporal_actions(
-                    request["champion"],
-                    model,
-                    prepared_temporal_actions(split),
-                    request["objective"],
-                    promotion_observations=len(split.promotion),
-                    max_prediction_time_ratio=request["max_prediction_time_ratio"],
-                )
-            else:
-                value = evaluate_temporally(
-                    request["champion"],
-                    model,
-                    split,
-                    request["objective"],
-                    max_prediction_time_ratio=request["max_prediction_time_ratio"],
-                )
+            value = progressive_validate(
+                request["champion"],
+                model,
+                request["observations"],
+                request["objective"],
+                max_prediction_time_ratio=request["max_prediction_time_ratio"],
+            )
         else:
             raise ValueError(f"unknown candidate operation: {request['operation']!r}")
         result = {"value": value}

@@ -4,20 +4,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
 
 from river import base, metrics
-
-
-@dataclass(frozen=True)
-class Observation:
-    """One optional in-memory example captured before online learning."""
-
-    sequence: int
-    x: dict[Any, Any]
-    y: Any
-    prediction: Any
-    learn_kwargs: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -31,7 +19,7 @@ class ConstraintResult:
 
 @dataclass(frozen=True)
 class Evaluation:
-    """Sealed evidence comparing a frozen candidate with its champion."""
+    """Evidence comparing fresh candidate and champion instances."""
 
     champion_score: float
     candidate_score: float
@@ -137,16 +125,3 @@ class Candidate:
     model: base.Classifier
     parent_generation: int
     hypothesis: str
-
-
-@dataclass(frozen=True)
-class ResearchSnapshot:
-    """Detached information made available for one reflection."""
-
-    champion: base.Classifier
-    generation: int
-    observations_seen: int
-    current_score: float
-    objective: Objective
-    history: tuple[Observation, ...]
-    context: Any = None

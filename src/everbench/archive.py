@@ -34,13 +34,6 @@ class PublishedArchive:
     byte_size: int
 
 
-@dataclass(frozen=True)
-class ArchiveCompaction:
-    source_files: int
-    replacement_files: int
-    row_count: int
-
-
 def storage_configured() -> bool:
     return CONFIG.s3_bucket_name is not None or CONFIG.archive_root is not None
 
@@ -141,25 +134,19 @@ def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes
     model = PickledModel("backtest", uploaded_model)
     tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
-    # Read archives made before the compact schema too.
-    event_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
-    has_sequence = "event_sequence" in parquet.schema.names
-    columns = ["event_id", event_column, "label", "event_available_at", "label_available_at"]
-    if has_sequence:
-        columns.append("event_sequence")
+    columns = ["event_id", "event_sequence", "payload_json", "label", "event_available_at", "label_available_at"]
 
     timeline: list[tuple[datetime, int, int, str, str, dict[str, float] | Any]] = []
-    fallback_sequence = 0
     for batch in parquet.iter_batches(columns=columns):
         for row in batch.to_pylist():
-            event = json.loads(row[event_column])
-            sequence = int(row["event_sequence"]) if has_sequence else fallback_sequence
-            fallback_sequence += 1
+            event = json.loads(row["payload_json"])
+            sequence = int(row["event_sequence"])
             event_id = row["event_id"]
             event_at = datetime.fromisoformat(row["event_available_at"])
             label_at = datetime.fromisoformat(row["label_available_at"])
-            if label_at < event_at:
-                raise ValueError(f"archive label for {event_id!r} became available before its event")
+            # A label may enter the inbox before its matching event. Learning
+            # cannot happen until both exist.
+            label_at = max(label_at, event_at)
             # Event actions sort before labels at exactly the same time.
             timeline.append((event_at, 0, sequence, event_id, "event", event))
             timeline.append((label_at, 1, sequence, event_id, "label", row["label"]))
@@ -218,89 +205,14 @@ def _publish_records(task_name: str, week_start: date, records: list[dict]) -> P
     return PublishedArchive(content_sha256, location, len(records), byte_size)
 
 
-def _compaction_record(row: dict, fallback_sequence: int) -> dict:
-    """Normalize archives from every supported schema before combining them."""
-    return {
-        "event_id": row["event_id"],
-        "event_sequence": row.get("event_sequence", fallback_sequence),
-        "event_available_at": row["event_available_at"],
-        "payload_json": row.get("payload_json", row.get("features_json")),
-        "label": row["label"],
-        "label_reason": row.get("label_reason"),
-        "label_available_at": row["label_available_at"],
-    }
-
-
-def compact_archive_week(
-    sessions: sessionmaker[Session], task_name: str, week_start: date, target_rows: int
-) -> ArchiveCompaction:
-    """Replace a week's small immutable shards with validated, bounded shards."""
-    if target_rows <= 0:
-        raise ValueError("target_rows must be positive")
-    with sessions() as session:
-        manifests = archive_store.archives_for_week(session, task_name, week_start)
-    source_rows = sum(manifest.row_count for manifest in manifests)
-    expected_files = (source_rows + target_rows - 1) // target_rows
-    if len(manifests) <= 1 or expected_files >= len(manifests):
-        return ArchiveCompaction(len(manifests), len(manifests), source_rows)
-
-    replacements: list[PublishedArchive] = []
-    pending: list[dict] = []
-    seen_event_ids: set[str] = set()
-    fallback_sequence = 0
-
-    def publish_pending(row_count: int) -> None:
-        records = pending[:row_count]
-        del pending[:row_count]
-        replacement = _publish_records(task_name, week_start, records)
-        parquet = pq.ParquetFile(pa.BufferReader(read_archive(replacement.path)))
-        if parquet.metadata.num_rows != replacement.row_count:
-            raise RuntimeError(f"replacement archive {replacement.content_sha256} failed row-count validation")
-        replacements.append(replacement)
-
-    for manifest in manifests:
-        parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
-        actual_rows = 0
-        for batch in parquet.iter_batches():
-            for row in batch.to_pylist():
-                record = _compaction_record(row, fallback_sequence)
-                fallback_sequence += 1
-                event_id = record["event_id"]
-                if event_id in seen_event_ids:
-                    raise RuntimeError(f"duplicate event {event_id!r} in archive week {week_start}")
-                seen_event_ids.add(event_id)
-                pending.append(record)
-                actual_rows += 1
-                if len(pending) == target_rows:
-                    publish_pending(target_rows)
-        if actual_rows != manifest.row_count:
-            raise RuntimeError(
-                f"archive {manifest.content_sha256} contains {actual_rows} rows; manifest says {manifest.row_count}"
-            )
-    if pending:
-        publish_pending(len(pending))
-    if sum(replacement.row_count for replacement in replacements) != source_rows:
-        raise RuntimeError("replacement archives do not preserve the source row count")
-
-    old_hashes = [manifest.content_sha256 for manifest in manifests]
-    with sessions.begin() as session:
-        archive_store.replace_archive_manifests(session, task_name, week_start, old_hashes, replacements)
-
-    replacement_paths = {replacement.path for replacement in replacements}
-    for manifest in manifests:
-        if manifest.path not in replacement_paths:
-            delete_archive(manifest.path)
-    return ArchiveCompaction(len(manifests), len(replacements), source_rows)
-
-
-def archive_batch_ready(week_start: date, cutoff: datetime, row_count: int, batch_size: int) -> bool:
-    """Publish full batches immediately and partial batches once their week is closed."""
+def archive_week_closed(week_start: date, cutoff: datetime) -> bool:
+    """Return whether an entire UTC availability week is past the cutoff."""
     week_end = datetime.combine(week_start + timedelta(days=7), time.min, UTC)
-    return row_count >= batch_size or cutoff >= week_end
+    return cutoff >= week_end
 
 
 def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
-    """Archive one eligible weekly partition batch, returning its event count.
+    """Archive one complete availability week into one Parquet file.
 
     Files have a deterministic content-hash name. A crash after file creation
     and before committing the manifest can therefore be safely retried without
@@ -313,23 +225,18 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
         week_start = archive_store.next_archive_week(session, task.TASK_NAME, cutoff)
         if week_start is None:
             return 0
-        row_count = archive_store.archive_row_count(
-            session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size
-        )
-        if not archive_batch_ready(week_start, cutoff, row_count, CONFIG.archive_batch_size):
+        if not archive_week_closed(week_start, cutoff):
             return 0
-        rows = archive_store.archive_rows(session, task.TASK_NAME, week_start, cutoff, CONFIG.archive_batch_size)
+        if not archive_store.archive_week_ready(session, task.TASK_NAME, week_start):
+            return 0
+        rows = archive_store.archive_rows(session, task.TASK_NAME, week_start)
     if not rows:
-        return 0
-    # A concurrent compactor may have removed rows between the count and read.
-    # Do not turn that race into another partial archive for an open week.
-    if not archive_batch_ready(week_start, cutoff, len(rows), CONFIG.archive_batch_size):
         return 0
     records = [_record(row) for row in rows]
     published = _publish_records(task.TASK_NAME, week_start, records)
     event_ids = [record["event_id"] for record in records]
     with sessions.begin() as session:
-        archive_store.record_archive(
+        inserted = archive_store.record_archive(
             session,
             published.content_sha256,
             task.TASK_NAME,
@@ -338,6 +245,10 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
             published.row_count,
             published.byte_size,
         )
+        if not inserted:
+            existing = archive_store.archive_for_week(session, task.TASK_NAME, week_start)
+            if existing is None or existing.content_sha256 != published.content_sha256:
+                raise RuntimeError(f"archive week {task.TASK_NAME}/{week_start} already has a different file")
         # The manifest commits with the delete, and only after the immutable
         # file was atomically published. A failed cycle leaves source rows for
         # the next periodic attempt.
@@ -346,19 +257,16 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
 
 
 def latest_labelled_examples(manifests: list, limit: int = 5) -> list[tuple[str, dict[str, Any], object]]:
-    """Read the last labelled records from Parquet manifests in event order."""
+    """Read recent examples from the newest weekly archive files."""
     examples: list[tuple[str, dict[str, Any], object]] = []
     for manifest in manifests:
         if len(examples) >= limit:
             break
         parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
-        # Archives written before the compact schema used ``features_json``;
-        # retain read compatibility while new files use ``payload_json``.
-        event_column = "features_json" if "features_json" in parquet.schema.names else "payload_json"
         for index in range(parquet.num_row_groups - 1, -1, -1):
-            rows = parquet.read_row_group(index, columns=["event_id", event_column, "label"]).to_pylist()
+            rows = parquet.read_row_group(index, columns=["event_id", "payload_json", "label"]).to_pylist()
             for row in reversed(rows):
-                examples.append((row["event_id"], json.loads(row[event_column]), row["label"]))
+                examples.append((row["event_id"], json.loads(row["payload_json"]), row["label"]))
                 if len(examples) == limit:
                     break
             if len(examples) == limit:

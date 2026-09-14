@@ -19,8 +19,8 @@ def begin_experiment(
     parent_generation: int,
     researcher: str,
     research_summary: dict[str, Any],
-    promotion_start_sequence: int,
-    promotion_end_sequence: int,
+    comparison_start_sequence: int,
+    comparison_end_sequence: int,
     champion_artifact_id: str,
 ) -> AutoExperiment:
     experiment = AutoExperiment(
@@ -31,8 +31,8 @@ def begin_experiment(
         researcher=researcher,
         status="running",
         research_summary=research_summary,
-        promotion_start_sequence=promotion_start_sequence,
-        promotion_end_sequence=promotion_end_sequence,
+        comparison_start_sequence=comparison_start_sequence,
+        comparison_end_sequence=comparison_end_sequence,
         champion_artifact_id=champion_artifact_id,
     )
     session.add(experiment)
@@ -69,6 +69,24 @@ def recent_experiments(session: Session, task_name: str, model_id: str, limit: i
             .where(AutoExperiment.task_name == task_name, AutoExperiment.model_id == model_id)
             .order_by(AutoExperiment.started_at.desc())
             .limit(limit)
+        )
+    )
+
+
+def experiment_for_cohort(
+    session: Session,
+    task_name: str,
+    model_id: str,
+    comparison_start_sequence: int,
+    comparison_end_sequence: int,
+) -> AutoExperiment | None:
+    """Return the experiment for an exact archive-week sequence range."""
+    return session.scalar(
+        select(AutoExperiment).where(
+            AutoExperiment.task_name == task_name,
+            AutoExperiment.model_id == model_id,
+            AutoExperiment.comparison_start_sequence == comparison_start_sequence,
+            AutoExperiment.comparison_end_sequence == comparison_end_sequence,
         )
     )
 

@@ -37,71 +37,55 @@ class FailingClassifier(CountingClassifier):
         raise RuntimeError("learning failed")
 
 
-def test_auto_classifier_delegates_and_only_retains_history_when_opted_in() -> None:
-    without_history = AutoClassifier(
+def test_auto_classifier_delegates_without_retaining_a_research_dataset() -> None:
+    model = AutoClassifier(
         model=CountingClassifier(positive_probability=0.75),
         objective=Objective(metrics.LogLoss()),
     )
-    assert without_history.predict_proba_one({"value": 1})[1] == 0.75
-    without_history.learn_one({"value": 1}, 1)
-    assert isinstance(without_history.model, CountingClassifier)
-    assert without_history.model.examples == 1
-    assert without_history.research_snapshot().history == ()
-
-    with_history = AutoClassifier(
-        model=CountingClassifier(positive_probability=0.75),
-        objective=Objective(metrics.LogLoss()),
-        history_capacity=2,
-    )
-    x = {"value": [1]}
-    with_history.learn_one(x, 1, w=2.0)
-    x["value"].append(2)
-
-    snapshot = with_history.research_snapshot()
-    assert snapshot.observations_seen == 1
-    assert snapshot.history[0].x == {"value": [1]}
-    assert snapshot.history[0].y == 1
-    assert snapshot.history[0].prediction[1] == 0.75
-    assert snapshot.history[0].learn_kwargs == {"w": 2.0}
-
-    snapshot.history[0].x["value"].append(3)
-    assert with_history.research_snapshot().history[0].x == {"value": [1]}
+    assert model.predict_proba_one({"value": 1})[1] == 0.75
+    model.learn_one({"value": 1}, 1)
+    assert isinstance(model.model, CountingClassifier)
+    assert model.model.examples == 1
+    assert not hasattr(model, "_history")
 
 
-def test_failed_learning_does_not_create_research_evidence() -> None:
-    model = AutoClassifier(FailingClassifier(), Objective(metrics.LogLoss()), history_capacity=10_000)
+def test_only_serving_state_is_serialized() -> None:
+    model = AutoClassifier(CountingClassifier(), Objective(metrics.Accuracy()))
+    model.__dict__["_history"] = [{"raw": "event"}]
+    model.__dict__["history_capacity"] = 5_000
+
+    restored = __import__("pickle").loads(__import__("pickle").dumps(model))
+
+    assert not hasattr(restored, "_history")
+    assert not hasattr(restored, "history_capacity")
+
+
+def test_failed_learning_does_not_update_the_serving_metric() -> None:
+    model = AutoClassifier(FailingClassifier(), Objective(metrics.LogLoss()))
 
     with pytest.raises(RuntimeError, match="learning failed"):
         model.learn_one({"value": 1}, 1)
 
-    snapshot = model.research_snapshot()
-    assert snapshot.observations_seen == 0
-    assert snapshot.history == ()
-    assert snapshot.current_score == 0.0
+    assert model.score == 0.0
 
 
-def test_research_snapshot_is_detached_from_live_model_and_objective() -> None:
+def test_context_and_objective_are_detached_from_the_caller() -> None:
     source_metric = metrics.LogLoss()
     source_context = {"problem_description": "Predict a delayed outcome", "labels": [0, 1]}
-    model = AutoClassifier(
-        CountingClassifier(), Objective(source_metric), history_capacity=10_000, context=source_context
-    )
+    model = AutoClassifier(CountingClassifier(), Objective(source_metric), context=source_context)
     source_context["labels"].append(2)
     model.learn_one({"value": 1}, 1)
 
-    snapshot = model.research_snapshot()
-    snapshot.champion.learn_one({"value": 2}, 0)
-    snapshot.objective.metric.update(1, {0: 0.9, 1: 0.1})
-    snapshot.context["labels"].append(3)
+    objective = model.objective
+    objective.metric.update(1, {0: 0.9, 1: 0.1})
+    context = model.context
+    context["labels"].append(3)
     source_metric.update(1, {0: 0.9, 1: 0.1})
 
-    fresh = model.research_snapshot()
     assert isinstance(model.model, CountingClassifier)
-    assert isinstance(fresh.champion, CountingClassifier)
     assert model.model.examples == 1
-    assert fresh.champion.examples == 1
-    assert fresh.objective.metric.get() == 0.0
-    assert fresh.context == {"problem_description": "Predict a delayed outcome", "labels": [0, 1]}
+    assert model.objective.metric.get() == 0.0
+    assert model.context == {"problem_description": "Predict a delayed outcome", "labels": [0, 1]}
 
 
 def test_consider_promotes_only_fresh_candidates_with_sufficient_evidence() -> None:
@@ -199,12 +183,3 @@ def test_secondary_metric_constraint_is_immutable_and_required() -> None:
         )
     )
     assert not objective.accepts(Evaluation(champion_score=0.5, candidate_score=0.4, observations=1))
-
-
-def test_in_memory_history_is_bounded() -> None:
-    model = AutoClassifier(CountingClassifier(), Objective(metrics.LogLoss()), history_capacity=2)
-
-    for value in range(3):
-        model.learn_one({"value": value}, value % 2)
-
-    assert [observation.sequence for observation in model.research_snapshot().history] == [2, 3]

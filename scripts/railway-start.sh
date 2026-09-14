@@ -18,7 +18,7 @@ case "${EVERBENCH_SERVICE_ROLE:-web}" in
         ;;
     researcher)
         export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-2}"
-        exec .venv/bin/everbench auto-worker-all --once
+        exec .venv/bin/everbench auto-worker-all
         ;;
     *)
         echo "EVERBENCH_SERVICE_ROLE must be 'web', 'worker', or 'researcher'" >&2

@@ -123,20 +123,20 @@ def run_task(
     hot = HotStore(CONFIG.hot_event_capacity, CONFIG.hot_event_max_bytes)
     failures: queue.SimpleQueue[Failure] = queue.SimpleQueue()
 
-    def compact() -> None:
+    def archive() -> None:
         """Periodically archive completed rows without interrupting live work."""
         if not storage_configured():
-            logging.warning("archive compactor disabled: no durable archive target is configured")
+            logging.warning("archiver disabled: no durable archive target is configured")
             stop.wait()
             return
         while not stop.is_set():
             try:
                 count = archive_once(sessions, task)
                 if count:
-                    logging.info("archived and compacted %d %s events", count, task.TASK_NAME)
+                    logging.info("archived one weekly file with %d %s events", count, task.TASK_NAME)
             except Exception:
                 # Source rows remain in Postgres and a later cycle retries.
-                logging.exception("archive compactor cycle failed")
+                logging.exception("archiver cycle failed")
             stop.wait(CONFIG.archive_interval_seconds)
 
     threads = [
@@ -158,7 +158,7 @@ def run_task(
             ),
             name="learner",
         ),
-        threading.Thread(target=_supervised(stop, failures, "archive compactor", compact), name="archive-compactor"),
+        threading.Thread(target=_supervised(stop, failures, "archiver", archive), name="archiver"),
     ]
 
     def detail() -> str:

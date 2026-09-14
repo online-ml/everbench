@@ -237,9 +237,9 @@ class AutoExperiment(Base):
         UniqueConstraint(
             "task_name",
             "model_id",
-            "promotion_start_sequence",
-            "promotion_end_sequence",
-            name="auto_experiments_promotion_cohort_key",
+            "comparison_start_sequence",
+            "comparison_end_sequence",
+            name="auto_experiments_comparison_key",
         ),
     )
 
@@ -253,8 +253,8 @@ class AutoExperiment(Base):
     proposal: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
     research_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
     evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
-    promotion_start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    promotion_end_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    comparison_start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    comparison_end_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     champion_artifact_id: Mapped[str] = mapped_column(
         String, ForeignKey("model_artifacts.artifact_id", ondelete="RESTRICT"), nullable=False
     )
@@ -270,6 +270,7 @@ class ArchiveManifest(Base):
     """Index entry for an immutable Parquet archive stored outside Postgres."""
 
     __tablename__ = "archive_manifest"
+    __table_args__ = (UniqueConstraint("task_name", "event_date", name="archive_manifest_task_week_key"),)
 
     content_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_name: Mapped[str] = mapped_column(String, nullable=False)

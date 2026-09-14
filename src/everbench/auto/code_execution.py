@@ -7,14 +7,14 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import cloudpickle
 from river import base
 
-from everbench.auto.dataset import PreparedTemporalSplit
-from everbench.auto.evaluation import EvaluationOutcome, TemporalSplit
+from everbench.auto.evaluation import ArchiveExample, EvaluationOutcome
 from everbench.auto.research import Objective
 
 ALLOWED_IMPORTS = {
@@ -36,6 +36,7 @@ ALLOWED_IMPORTS = {
     "statistics",
     "typing",
 }
+DATA_RETAINING_RIVER_MODULES = {"neighbors"}
 BLOCKED_CALLS = {
     "__import__",
     "breakpoint",
@@ -67,6 +68,11 @@ def validate_candidate_source(source: str, max_bytes: int) -> None:
             for name in names:
                 if not any(name == allowed or name.startswith(f"{allowed}.") for allowed in ALLOWED_IMPORTS):
                     raise ValueError(f"candidate import is not allowed: {name!r}")
+            if isinstance(node, ast.ImportFrom) and (
+                (node.module == "river" and any(alias.name in DATA_RETAINING_RIVER_MODULES for alias in node.names))
+                or (node.module or "").split(".")[:2] == ["river", "neighbors"]
+            ):
+                raise ValueError("candidate may not use River models that retain training examples")
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in BLOCKED_CALLS:
             raise ValueError(f"candidate call is not allowed: {node.func.id}()")
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
@@ -149,7 +155,7 @@ def build_candidate_model(
 def evaluate_candidate_source(
     source: str,
     champion: base.Classifier,
-    split: TemporalSplit | PreparedTemporalSplit,
+    observations: Sequence[ArchiveExample],
     objective: Objective,
     *,
     max_prediction_time_ratio: float,
@@ -163,7 +169,7 @@ def evaluate_candidate_source(
             "operation": "evaluate",
             "source": source,
             "champion": champion,
-            "split": split,
+            "observations": observations,
             "objective": objective,
             "max_prediction_time_ratio": max_prediction_time_ratio,
         },

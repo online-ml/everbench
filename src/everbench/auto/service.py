@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import threading
 from dataclasses import dataclass, replace
-from time import monotonic
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import archive, archive_store, artifacts, model_store
+from everbench import archive_store, artifacts, model_store
 from everbench.auto import store
 from everbench.auto.classifier import AutoClassifier
 from everbench.auto.code_execution import build_candidate_model, evaluate_candidate_source
@@ -23,18 +22,18 @@ from everbench.auto.code_researcher import (
     summarize_research,
 )
 from everbench.auto.config import AutoResearchConfig
-from everbench.auto.dataset import PreparedTemporalData
-from everbench.auto.everbench import EverbenchAutoClassifier, complete_observations, iter_complete_observations
+from everbench.auto.dataset import ArchiveWeek
+from everbench.auto.everbench import EverbenchAutoClassifier
 from everbench.auto.research import Candidate, ConstraintResult
 from everbench.config import CONFIG
 from everbench.heartbeat import Heartbeat
 from everbench.metrics import MetricTracker
-from everbench.schema import AutoExperiment, ModelRegistration
+from everbench.schema import ArchiveManifest, AutoExperiment, ModelRegistration
 from everbench.tasks import TaskDefinition
 
 
 class NoNewPromotionEvidence(RuntimeError):
-    """A reflection was skipped until a fresh sealed cohort has matured."""
+    """A reflection was skipped until a new complete archive week exists."""
 
 
 @dataclass(frozen=True)
@@ -129,31 +128,64 @@ def _source_for_registration(session: Session, registration: ModelRegistration) 
     return source
 
 
+def _latest_archive_week(session: Session, task_name: str) -> tuple[date, ArchiveManifest] | None:
+    cutoff = datetime.now(UTC) - timedelta(days=CONFIG.archive_after_days)
+    week_start = archive_store.latest_complete_archive_week(session, task_name, cutoff)
+    if week_start is None:
+        return None
+    manifest = archive_store.archive_for_week(session, task_name, week_start)
+    if manifest is None:
+        return None
+    return week_start, manifest
+
+
+def _prepare_archive_week(manifest: ArchiveManifest) -> ArchiveWeek:
+    return ArchiveWeek.open(manifest)
+
+
 def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition) -> AutoRunReport:
-    """Register the task's initial champion, pre-trained on mature history."""
+    """Register the initial champion, trained on the latest complete archive week."""
     config = _config(task)
     with sessions() as session:
         existing = model_store.model_registration(session, task.TASK_NAME, config.model_id)
         if existing is not None:
             auto_classifier, _ = _load_auto(session, existing)
             return AutoRunReport(task.TASK_NAME, config.model_id, None, "existing", auto_classifier.generation)
-        observations = complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
-    if len(observations) < config.min_research_observations + config.promotion_observations:
-        required = config.min_research_observations + config.promotion_observations
-        raise ValueError(f"bootstrap needs at least {required:,} mature observations; received {len(observations):,}")
-    source = config.candidate_path.read_text()
+        archived_week = _latest_archive_week(session, task.TASK_NAME)
+    source = config.seed_path.read_text()
     initial_model = build_candidate_model(
         source,
         timeout_seconds=config.candidate_timeout_seconds,
         max_source_bytes=config.max_candidate_source_bytes,
         max_output_bytes=CONFIG.max_model_snapshot_bytes,
     )
+    checkpoint_label_available_at = None
+    checkpoint_event_sequence = None
+    trained_observations = 0
+    trained_week: date | None = None
+    if archived_week is not None:
+        trained_week, manifest = archived_week
+        with _prepare_archive_week(manifest) as prepared:
+            if len(prepared) < config.min_archive_observations:
+                raise ValueError(
+                    f"bootstrap archive week needs at least {config.min_archive_observations:,} observations; "
+                    f"received {len(prepared):,}"
+                )
+            outcome = evaluate_candidate_source(
+                source,
+                initial_model,
+                prepared,
+                config.objective,
+                max_prediction_time_ratio=config.max_prediction_time_ratio,
+                timeout_seconds=config.candidate_timeout_seconds,
+                max_source_bytes=config.max_candidate_source_bytes,
+                max_output_bytes=CONFIG.max_model_snapshot_bytes,
+            )
+            initial_model = outcome.trained_candidate
+            checkpoint_label_available_at = outcome.checkpoint_label_available_at
+            checkpoint_event_sequence = outcome.checkpoint_event_sequence
+            trained_observations = len(prepared)
     auto_classifier = AutoClassifier(initial_model, config.objective, context=config.context)
-    # Bootstrap is ordinary offline pre-training over fully mature historical
-    # outcomes. It has no future target leakage and avoids reproducing a cold
-    # stream's initial positive-only feedback window.
-    for observation in sorted(observations, key=lambda row: (row.available_at, row.sequence)):
-        auto_classifier.learn_one(observation.x, observation.y)
     initial_model_bytes = len(artifacts.dumps(auto_classifier.model))
     if initial_model_bytes > config.max_candidate_model_bytes:
         raise ValueError(
@@ -161,7 +193,6 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
             f"auto promotion limit is {config.max_candidate_model_bytes:,} bytes"
         )
     payload = _payload(auto_classifier)
-    last = max(observations, key=lambda row: (row.label_available_at, row.sequence))
     with sessions.begin() as session:
         model_store.lock_model_registrations(session, task.TASK_NAME)
         existing = model_store.model_registration(session, task.TASK_NAME, config.model_id)
@@ -177,6 +208,7 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
             {
                 "source": "auto-bootstrap",
                 "generation": 0,
+                "archive_week": trained_week.isoformat() if trained_week is not None else None,
                 "source_code": source,
                 "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
             },
@@ -187,8 +219,8 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
             task.TASK_NAME,
             config.model_id,
             payload,
-            last.label_available_at,
-            last.sequence,
+            checkpoint_label_available_at,
+            checkpoint_event_sequence,
             None,
         )
     return AutoRunReport(
@@ -197,7 +229,11 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
         None,
         "bootstrapped",
         0,
-        f"trained on {len(observations):,} mature observations",
+        (
+            f"trained on {trained_observations:,} observations from archive week {trained_week}"
+            if trained_week is not None
+            else "registered fresh; no complete archive week is available"
+        ),
     )
 
 
@@ -245,35 +281,36 @@ def _reflect_once(
     *,
     researcher: Any | None = None,
 ) -> AutoRunReport:
-    """Propose, causally evaluate, audit, and atomically promote one candidate."""
+    """Compare fresh definitions on one complete archive week."""
     config = _config(task)
-    prepared: PreparedTemporalData | None = None
+    prepared: ArchiveWeek | None = None
     try:
         with sessions() as session:
             registration = model_store.model_registration(session, task.TASK_NAME, config.model_id)
             if registration is None:
                 raise LookupError(f"auto model {config.model_id!r} is not bootstrapped")
             auto_classifier, champion_artifact_id = _load_auto(session, registration)
-            current_source = _source_for_registration(session, registration)
+            champion_source = _source_for_registration(session, registration)
             registration_artifact_id = registration.artifact_id
             if registration_artifact_id is None:
                 raise RuntimeError(f"auto model registration artifact missing for {config.model_id}")
-            prepared = PreparedTemporalData.from_observations(
-                iter_complete_observations(session, task, config.history_limit, config.maturity_margin_seconds)
-            )
+            archived_week = _latest_archive_week(session, task.TASK_NAME)
+            if archived_week is None:
+                raise NoNewPromotionEvidence("waiting for a complete archive week")
+            week_start, manifest = archived_week
             recent = store.recent_experiments(session, task.TASK_NAME, config.model_id)
-            manifests = archive_store.task_archives(session, task.TASK_NAME) if config.retain_raw_examples else []
+        prepared = _prepare_archive_week(manifest)
         return _reflect_prepared_once(
             sessions,
             task,
             config,
             auto_classifier,
             champion_artifact_id,
-            current_source,
+            champion_source,
             registration_artifact_id,
             prepared,
             recent,
-            manifests,
+            week_start,
             researcher,
         )
     finally:
@@ -287,48 +324,38 @@ def _reflect_prepared_once(
     config: AutoResearchConfig,
     auto_classifier: AutoClassifier,
     champion_artifact_id: str,
-    current_source: str,
+    champion_source: str,
     registration_artifact_id: str,
-    prepared: PreparedTemporalData,
+    prepared: ArchiveWeek,
     recent: list[AutoExperiment],
-    manifests: list[Any],
+    week_start: date,
     researcher: Any | None,
 ) -> AutoRunReport:
-    split = prepared.split(config.promotion_observations, config.min_research_observations)
-    research_span = (split.research[-1].available_at - split.research[0].available_at).total_seconds()
-    if research_span < config.min_research_span_seconds:
+    if len(prepared) < config.min_archive_observations:
         raise NoNewPromotionEvidence(
-            f"research history spans {research_span / 3_600:.1f}h; waiting for "
-            f"{config.min_research_span_seconds / 3_600:.1f}h before causal evaluation"
+            f"archive week {week_start} has {len(prepared):,} observations; "
+            f"waiting for at least {config.min_archive_observations:,}"
         )
-    promotion_start, promotion_end = split.promotion.sequence_bounds()
-    snapshot = auto_classifier.research_snapshot()
-    summary = summarize_research(split.research, include_raw_examples=config.retain_raw_examples)
-    for example in summary.get("raw_examples", []):
-        example["current_champion_prediction"] = snapshot.champion.predict_proba_one(example["event"])
-    if manifests:
-        summary["archived_examples"] = [
-            {"event_id": event_id, "event": event, "label": label}
-            for event_id, event, label in archive.latest_labelled_examples(manifests, limit=5)
-        ]
-    backend = researcher or OpenAICodeResearcher(max_experiments=config.max_research_experiments)
+    comparison = prepared
+    comparison_start, comparison_end = comparison.sequence_bounds()
+    summary = summarize_research(comparison)
+    summary["archive_week"] = week_start.isoformat()
+    backend = researcher or OpenAICodeResearcher(candidate_budget=config.candidate_budget_per_week)
     researcher_name = getattr(backend, "model", type(backend).__name__)
-    inner_promotion_size = min(
-        config.research_evaluation_observations,
-        max(len(split.research) // 4, 1),
+    champion = build_candidate_model(
+        champion_source,
+        timeout_seconds=config.candidate_timeout_seconds,
+        max_source_bytes=config.max_candidate_source_bytes,
+        max_output_bytes=CONFIG.max_model_snapshot_bytes,
     )
-    inner_split = prepared.split(
-        inner_promotion_size,
-        len(split.research) - inner_promotion_size,
-        stop=len(split.research),
-    )
-    objective_description = describe_objective(snapshot.objective)
+    objective = auto_classifier.objective
+    objective_description = describe_objective(objective)
     objective_description["max_serialized_model_bytes"] = config.max_candidate_model_bytes
     research_request = ResearchRequest(
-        context=snapshot.context,
+        context=auto_classifier.context,
         objective=objective_description,
         research_summary=summary,
-        current_source=current_source,
+        champion_source=champion_source,
         previous_experiments=_past_experiments(recent),
     )
 
@@ -336,11 +363,16 @@ def _reflect_prepared_once(
     # succeeded. From here onward, every failure is recorded below.
     with sessions.begin() as session:
         model_store.lock_model_registrations(session, task.TASK_NAME)
-        previous = store.latest_experiment(session, task.TASK_NAME, config.model_id)
-        if previous is not None and promotion_start <= previous.promotion_end_sequence:
+        previous = store.experiment_for_cohort(
+            session,
+            task.TASK_NAME,
+            config.model_id,
+            comparison_start,
+            comparison_end,
+        )
+        if previous is not None:
             raise NoNewPromotionEvidence(
-                f"latest promotion cohort overlaps experiment {previous.experiment_id}; waiting for "
-                f"{config.promotion_observations:,} new mature observations"
+                f"archive week {week_start} was already evaluated by experiment {previous.experiment_id}"
             )
         experiment = store.begin_experiment(
             session,
@@ -349,8 +381,8 @@ def _reflect_prepared_once(
             auto_classifier.generation,
             str(researcher_name),
             summary,
-            promotion_start,
-            promotion_end,
+            comparison_start,
+            comparison_end,
             champion_artifact_id,
         )
         experiment_id = experiment.experiment_id
@@ -359,9 +391,9 @@ def _reflect_prepared_once(
         outcome = _with_model_size_constraint(
             evaluate_candidate_source(
                 source,
-                snapshot.champion,
-                inner_split,
-                snapshot.objective,
+                champion,
+                comparison,
+                objective,
                 max_prediction_time_ratio=config.max_prediction_time_ratio,
                 timeout_seconds=config.candidate_timeout_seconds,
                 max_source_bytes=config.max_candidate_source_bytes,
@@ -376,9 +408,9 @@ def _reflect_prepared_once(
         outcome = _with_model_size_constraint(
             evaluate_candidate_source(
                 code_proposal.source,
-                snapshot.champion,
-                split,
-                snapshot.objective,
+                champion,
+                comparison,
+                objective,
                 max_prediction_time_ratio=config.max_prediction_time_ratio,
                 timeout_seconds=config.candidate_timeout_seconds,
                 max_source_bytes=config.max_candidate_source_bytes,
@@ -389,7 +421,7 @@ def _reflect_prepared_once(
         promoted = auto_classifier.consider(
             Candidate(
                 outcome.trained_candidate,
-                parent_generation=snapshot.generation,
+                parent_generation=auto_classifier.generation,
                 hypothesis=code_proposal.hypothesis,
             ),
             outcome.evaluation,
@@ -424,6 +456,7 @@ def _reflect_prepared_once(
                         "source_code": code_proposal.source,
                         "source_sha256": source_sha256,
                         "experiment_id": experiment_id,
+                        "archive_week": week_start.isoformat(),
                     },
                 )
                 candidate_artifact_id = artifact_record.artifact_id
@@ -466,9 +499,9 @@ def _reflect_prepared_once(
 class AutoResearchRunner:
     """Everbench-owned lifecycle around the portable AutoClassifier.
 
-    The runner owns database/archive access, agent invocation, isolated code
-    execution, sealed evaluation, and atomic promotion. None of those concerns
-    leak into the River-compatible classifier.
+    The runner owns archive access, agent invocation, isolated weekly
+    comparison, and atomic promotion. None of those concerns leak into the
+    River-compatible classifier.
     """
 
     def __init__(
@@ -492,36 +525,21 @@ class AutoResearchRunner:
 def auto_worker(
     sessions: sessionmaker[Session],
     tasks: list[TaskDefinition],
-    *,
-    once: bool = False,
-    stop: threading.Event | None = None,
 ) -> None:
-    """Periodically reflect for every task that opts into autonomous research."""
+    """Run one weekly research pass for every configured task, then exit."""
     configured = [task for task in tasks if isinstance(task.AUTO_RESEARCH, AutoResearchConfig)]
     if not configured:
         raise ValueError("no tasks define autonomous research")
-    stop = stop or threading.Event()
-    next_run = {task.TASK_NAME: 0.0 for task in configured}
     with Heartbeat(sessions, None, "auto-researcher"):
-        while not stop.is_set():
-            now = monotonic()
-            due = configured if once else [task for task in configured if next_run[task.TASK_NAME] <= now]
-            if not due:
-                stop.wait(max(min(next_run.values()) - now, 0.0))
-                continue
-            for task in due:
-                config = _config(task)
-                runner = AutoResearchRunner(sessions, task)
-                try:
-                    report = runner.bootstrap()
-                    if report.status == "bootstrapped":
-                        logging.info("%s: %s", task.TASK_NAME, report.detail)
-                    report = runner.reflect()
-                    logging.info("%s: auto reflection %s: %s", task.TASK_NAME, report.status, report.detail)
-                except NoNewPromotionEvidence as error:
-                    logging.info("%s: %s", task.TASK_NAME, error)
-                except Exception:
-                    logging.exception("%s: autonomous research cycle failed", task.TASK_NAME)
-                next_run[task.TASK_NAME] = monotonic() + config.interval_seconds
-            if once:
-                return
+        for task in configured:
+            runner = AutoResearchRunner(sessions, task)
+            try:
+                report = runner.bootstrap()
+                if report.status == "bootstrapped":
+                    logging.info("%s: %s", task.TASK_NAME, report.detail)
+                report = runner.reflect()
+                logging.info("%s: auto reflection %s: %s", task.TASK_NAME, report.status, report.detail)
+            except NoNewPromotionEvidence as error:
+                logging.info("%s: %s", task.TASK_NAME, error)
+            except Exception:
+                logging.exception("%s: autonomous research cycle failed", task.TASK_NAME)

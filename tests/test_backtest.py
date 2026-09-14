@@ -68,3 +68,27 @@ def test_labels_only_affect_the_model_when_they_become_available(
     assert result["timing_seconds"]["total"] == (
         result["timing_seconds"]["predict"] + result["timing_seconds"]["learn"]
     )
+
+
+def test_label_inbox_arrival_before_event_is_clamped_to_event_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "test-signing-key")
+    task = load_task(Path(__file__).parents[1] / "tasks" / "dummy" / "task.py")
+    rows = [
+        {
+            "event_id": "late-event",
+            "event_sequence": 1,
+            "event_available_at": "2026-01-01T00:00:02+00:00",
+            "payload_json": '{"value":1}',
+            "label": 1,
+            "label_available_at": "2026-01-01T00:00:01+00:00",
+        }
+    ]
+    path = tmp_path / "early-label.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), path)
+
+    result = replay_archive(task, DelayedRate(), path)
+
+    assert result["predictions"] == 1
+    assert result["labels"] == 1

@@ -9,8 +9,6 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 from river import metrics
 from sqlalchemy import select
@@ -18,7 +16,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive, archive_store, artifacts, event_store, model_store, reporting
 from everbench.auto import store as auto_store
-from everbench.auto.everbench import complete_observations, iter_complete_observations
 from everbench.auto.service import _reset_generation_metrics
 from everbench.config import CONFIG
 from everbench.db import make_session_factory
@@ -65,58 +62,22 @@ def signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "postgres-test-signing-key")
 
 
-def test_complete_observations_streams_latest_cohort_in_event_order(
-    sessions: sessionmaker[Session],
-) -> None:
-    task_name = f"observation-stream-test-{uuid4()}"
-    start = datetime.now(UTC) - timedelta(days=3)
-    with sessions.begin() as session:
-        for index in range(5):
-            available_at = start + timedelta(seconds=index)
-            session.add(
-                BenchmarkEvent(
-                    task_name=task_name,
-                    event_id=str(index),
-                    sequence=index,
-                    event_time=available_at,
-                    event={"value": index},
-                    inserted_at=available_at,
-                )
-            )
-            session.add(
-                BenchmarkLabel(
-                    task_name=task_name,
-                    event_id=str(index),
-                    y=index % 2,
-                    reason="test",
-                    available_at=available_at + timedelta(seconds=1),
-                    inserted_at=available_at + timedelta(seconds=1),
-                )
-            )
-    task = cast(
-        TaskDefinition,
-        SimpleNamespace(TASK_NAME=task_name, NEGATIVE_LABEL_DELAY_SECONDS=None),
-    )
-
-    with sessions() as session:
-        streamed = tuple(iter_complete_observations(session, task, limit=3))
-        loaded = complete_observations(session, task, limit=3)
-
-    assert [row.observation_id for row in streamed] == ["2", "3", "4"]
-    assert loaded == streamed
-
-
 def test_archive_removes_predictions_before_events(
     sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     task_name = f"archive-test-{uuid4()}"
     event_id = "event"
+    inserted_at = datetime.now(UTC) - timedelta(days=15)
+    week_start = inserted_at.date() - timedelta(days=inserted_at.weekday())
     with sessions.begin() as session:
         event_store.add_events(
             session,
             task_name,
             [(event_id, (datetime.now(UTC) - timedelta(days=2)).timestamp(), {"value": 1.0})],
         )
+        event = session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id})
+        assert event is not None
+        event.inserted_at = inserted_at
         event_store.add_labels(session, task_name, [event_store.LabelInput(event_id, 1, "test")], delay_seconds=None)
         payload = artifacts.dumps(WorkingModel())
         artifact = model_store.store_artifact(session, payload, artifacts.sign(payload), {})
@@ -141,11 +102,11 @@ def test_archive_removes_predictions_before_events(
             archive_root=tmp_path,
             s3_bucket_name=None,
             archive_after_days=0,
-            archive_batch_size=1,
         ),
     )
 
     assert archive.archive_once(sessions, cast(TaskDefinition, SimpleNamespace(TASK_NAME=task_name))) == 1
+    assert archive.archive_once(sessions, cast(TaskDefinition, SimpleNamespace(TASK_NAME=task_name))) == 0
 
     with sessions() as session:
         assert session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id}) is None
@@ -157,64 +118,20 @@ def test_archive_removes_predictions_before_events(
             )
             is None
         )
-        assert session.scalar(select(ArchiveManifest).where(ArchiveManifest.task_name == task_name)) is not None
-
-
-def test_archive_compaction_replaces_small_shards_without_losing_rows(
-    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    task_name = f"archive-compaction-test-{uuid4()}"
-    week_start = datetime(2026, 8, 31, tzinfo=UTC).date()
-    source_paths: list[Path] = []
-    source_hashes: list[str] = []
-    with sessions.begin() as session:
-        for shard in range(3):
-            path = tmp_path / f"source-{shard}.parquet"
-            records = [
-                {
-                    "event_id": f"{shard}-{index}",
-                    "event_sequence": shard * 2 + index,
-                    "event_available_at": f"2026-09-0{shard + 1}T00:00:0{index}+00:00",
-                    "payload_json": f'{{"value":{shard * 2 + index}}}',
-                    "label": index % 2,
-                    "label_reason": "test",
-                    "label_available_at": f"2026-09-0{shard + 1}T00:00:1{index}+00:00",
-                }
-                for index in range(2)
-            ]
-            pq.write_table(pa.Table.from_pylist(records), path)
-            content_sha256 = uuid4().hex
-            source_paths.append(path)
-            source_hashes.append(content_sha256)
-            session.add(
-                ArchiveManifest(
-                    content_sha256=content_sha256,
-                    task_name=task_name,
-                    event_date=week_start,
-                    path=str(path),
-                    row_count=len(records),
-                    byte_size=path.stat().st_size,
-                    created_at=datetime(2026, 9, shard + 1, tzinfo=UTC),
-                )
-            )
-
-    monkeypatch.setattr(archive, "CONFIG", replace(CONFIG, archive_root=tmp_path, s3_bucket_name=None))
-
-    result = archive.compact_archive_week(sessions, task_name, week_start, target_rows=4)
-
-    assert result == archive.ArchiveCompaction(source_files=3, replacement_files=2, row_count=6)
-    with sessions() as session:
-        replacements = list(
-            session.scalars(
-                select(ArchiveManifest)
-                .where(ArchiveManifest.task_name == task_name)
-                .order_by(ArchiveManifest.row_count.desc())
-            )
+        manifests = list(session.scalars(select(ArchiveManifest).where(ArchiveManifest.task_name == task_name)))
+        assert len(manifests) == 1
+        assert manifests[0].row_count == 1
+        assert archive_store.archive_for_week(session, task_name, manifests[0].event_date) == manifests[0]
+        assert archive_store.latest_complete_archive_week(session, task_name, datetime.now(UTC)) == week_start
+        assert not archive_store.record_archive(
+            session,
+            "f" * 64,
+            task_name,
+            manifests[0].event_date,
+            "different.parquet",
+            1,
+            1,
         )
-    assert [manifest.row_count for manifest in replacements] == [4, 2]
-    assert not set(source_hashes) & {manifest.content_sha256 for manifest in replacements}
-    assert all(not path.exists() for path in source_paths)
-    assert all(Path(manifest.path).is_file() for manifest in replacements)
 
 
 def test_task_stats_include_archives_and_exclude_orphan_labels(sessions: sessionmaker[Session]) -> None:

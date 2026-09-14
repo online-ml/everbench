@@ -249,7 +249,7 @@ def advance_model_checkpoint(
 
     A paused model deliberately does not learn its skipped labels. Its current
     artifact therefore remains the right restart state, while the watermark
-    prevents those terminal labels from indefinitely blocking compaction.
+    prevents those terminal labels from indefinitely blocking weekly archival.
     """
     snapshot = latest_snapshot(session, task_name, registration.model_id)
     if snapshot is None:

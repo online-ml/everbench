@@ -7,8 +7,7 @@ import math
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache, wraps
 from hmac import compare_digest
 from importlib.metadata import distributions
@@ -59,34 +58,6 @@ def format_time_since(value: datetime) -> str:
 
 def archive_download_name(task_name: str, manifest: Any) -> str:
     return f"{task_name}-{manifest.event_date.isoformat()}-{manifest.content_sha256[:12]}.parquet"
-
-
-@dataclass(frozen=True)
-class ArchiveGroup:
-    event_date: date
-    archives: tuple[Any, ...]
-    row_count: int
-    byte_size: int | None
-
-
-def group_archives(manifests: list[Any]) -> list[ArchiveGroup]:
-    """Present physical archive shards as weekly logical archives."""
-    grouped: dict[date, list[Any]] = {}
-    for manifest in manifests:
-        grouped.setdefault(manifest.event_date, []).append(manifest)
-
-    result = []
-    for event_date, archives in grouped.items():
-        sizes = [archive.byte_size for archive in archives]
-        result.append(
-            ArchiveGroup(
-                event_date=event_date,
-                archives=tuple(archives),
-                row_count=sum(archive.row_count for archive in archives),
-                byte_size=sum(sizes) if all(size is not None for size in sizes) else None,
-            )
-        )
-    return result
 
 
 @lru_cache
@@ -313,14 +284,13 @@ def create_app(
     def task_dashboard(task_name: str) -> str:
         task = task_or_404(task_name)
         snapshot = task_snapshot(_session(), task)
-        archive_groups = group_archives(archive_store.task_archives(_session(), task_name))
         return render_template(
             "task.html",
             task_name=task_name,
             task_type=task.PROBLEM_TYPE,
             task_source_url=task_source_url(task),
             task_description=task.DESCRIPTION_HTML,
-            archive_groups=archive_groups,
+            archives=archive_store.task_archives(_session(), task_name),
             **snapshot,
         )
 

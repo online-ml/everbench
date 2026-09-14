@@ -12,16 +12,20 @@ Tasks may opt into a Karpathy-style autonomous research loop with an `AutoResear
 holds the serving champion, immutable objective, generation, and arbitrary problem context. Everbench keeps the
 coding agent outside that portable River-compatible class.
 
-The agent may replace a task's complete `candidate.py`: feature extraction over the raw event payload, River model
-families, hyperparameters, drift handling, ensembles, and stacking are all in scope. It can repeatedly evaluate code
-on agent-visible research history. Everbench then freezes the source and evaluates it causally on a fresh sealed
-cohort, preserving the original event and delayed-label availability times. Promotion also requires task-owned
-secondary metric and resource constraints.
+Everbench publishes exactly one immutable Parquet file for each completed UTC availability week. When a new week is
+available, the agent may replace a task's complete `candidate.py`: feature extraction over the raw event payload,
+River model families, hyperparameters, drift handling, ensembles, and stacking are all in scope. Every evaluation
+constructs fresh champion and candidate instances and causally replays the same archive week through both, preserving
+the original event and delayed-label availability times with River's `evaluate.progressive_val_score`. The best
+candidate is promoted only when it beats that fresh
+champion under the task-owned metric and resource constraints. `candidate_budget_per_week` configures how many
+candidate programs the researcher may evaluate during that single weekly run.
 
 Candidate execution has a fixed dependency/import policy, subprocess timeout, file descriptor/output limits, source
 size limit, model artifact size limit, and a scrubbed environment. Candidate source cannot import operating-system,
-filesystem, process, or network modules. Raw examples are never placed in the model prompt by default.
-Tasks may explicitly opt in to a small sample of research rows, current champion predictions, and archived examples.
+filesystem, process, or network modules. Archives—not model artifacts—own the observations. Serving models may retain
+bounded learned parameters and sufficient statistics, but candidate programs are instructed not to retain raw rows or
+payload identifiers.
 
 Useful commands:
 

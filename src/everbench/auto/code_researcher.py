@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from everbench.auto.evaluation import TemporalObservation
+from everbench.auto.evaluation import ArchiveExample
 
 INSTRUCTIONS = """You are an autonomous online-machine-learning researcher.
 You may replace the complete candidate.py program. Its build_model() function
@@ -19,10 +19,18 @@ system, filesystem, network, environment, or secret access. Dependencies are
 fixed to the imports admitted by the candidate validator.
 
 Submit each complete program and hypothesis to evaluate_candidate. Iterate from
-the measured research results, then call finish. The best constraint-passing
-program you evaluated is frozen automatically. Promotion is decided later on a
-separate sealed cohort that you never see. Prefer causal, bounded-memory online
-designs.
+the measured results, then call finish. Every evaluation constructs fresh
+instances of the current champion and candidate, then causally replays the same
+completed archive week through both. The best constraint-passing program is
+promoted only if it beats the champion on that comparison. Use the available
+candidate budget to explore materially different model or feature approaches.
+
+The archive is the training dataset. A model may keep bounded learned
+parameters and sufficient statistics, but it must not retain observations,
+raw payloads, or identifiers such as users, titles, comments, or network
+addresses. Do not use nearest-neighbor/replay buffers or dictionaries keyed by
+raw categorical values. Prefer fixed numeric features, fixed-width hashing,
+and bounded parametric online models.
 """
 
 
@@ -33,7 +41,7 @@ class ResearchRequest:
     context: Any
     objective: dict[str, Any]
     research_summary: dict[str, Any]
-    current_source: str
+    champion_source: str
     previous_experiments: tuple[dict[str, Any], ...] = ()
 
 
@@ -48,7 +56,7 @@ def describe_objective(objective: Any) -> dict[str, Any]:
         "primary_metric": type(objective.metric).__name__,
         "bigger_is_better": objective.metric.bigger_is_better,
         "minimum_improvement": objective.min_improvement,
-        "minimum_promotion_observations": objective.min_observations,
+        "minimum_comparison_observations": objective.min_observations,
         "required_constraints": list(objective.required_constraints),
         "secondary_metric_constraints": [
             {
@@ -62,18 +70,15 @@ def describe_objective(objective: Any) -> dict[str, Any]:
 
 
 def summarize_research(
-    observations: Sequence[TemporalObservation],
-    *,
-    include_raw_examples: bool = False,
-    max_examples: int = 12,
+    observations: Sequence[ArchiveExample],
 ) -> dict[str, Any]:
-    """Describe agent-visible history, optionally including bounded raw rows."""
-    if max_examples <= 0:
-        raise ValueError("max_examples must be positive")
+    """Describe an archive week without copying observations into the prompt."""
     first = observations[0]
     last = observations[-1]
     positive_counter = getattr(observations, "positive_count", None)
-    positives = int(positive_counter()) if callable(positive_counter) else sum(int(bool(row.y)) for row in observations)
+    positives = (
+        int(positive_counter()) if callable(positive_counter) else sum(int(bool(row[3])) for row in observations)
+    )
     feature_types: dict[str, set[str]] = {}
 
     def record(value: Any, path: str, depth: int = 0) -> None:
@@ -88,27 +93,14 @@ def summarize_research(
                 record(child, f"{path}[]", depth + 1)
 
     for row in observations[: min(len(observations), 1_000)]:
-        record(row.x, "")
-    summary: dict[str, Any] = {
+        record(row[2], "")
+    return {
         "observations": len(observations),
         "positive_rate": positives / len(observations),
-        "available_from": first.available_at.isoformat(),
-        "available_to": last.available_at.isoformat(),
+        "available_from": first[4].isoformat(),
+        "available_to": last[4].isoformat(),
         "payload_schema": {key: sorted(values) for key, values in sorted(feature_types.items())},
     }
-    if include_raw_examples:
-        step = max(len(observations) // max_examples, 1)
-        summary["raw_examples"] = [
-            {
-                "sequence": row.sequence,
-                "event": row.x,
-                "label": row.y,
-                "event_available_at": row.available_at.isoformat(),
-                "label_available_at": row.label_available_at.isoformat(),
-            }
-            for row in observations[::step][:max_examples]
-        ]
-    return summary
 
 
 class OpenAICodeResearcher:
@@ -118,17 +110,19 @@ class OpenAICodeResearcher:
         self,
         model: str = "gpt-5.6-terra",
         reasoning_effort: str = "high",
-        max_experiments: int = 6,
+        candidate_budget: int = 6,
         response_timeout_seconds: float = 300.0,
         client: Any = None,
     ) -> None:
+        if candidate_budget <= 0:
+            raise ValueError("candidate_budget must be positive")
         if client is None:
             from openai import OpenAI
 
             client = OpenAI()
         self.model = model
         self.reasoning_effort = reasoning_effort
-        self.max_experiments = max_experiments
+        self.candidate_budget = candidate_budget
         self.response_timeout_seconds = response_timeout_seconds
         self.client: Any = client
 
@@ -145,7 +139,7 @@ class OpenAICodeResearcher:
             {
                 "type": "function",
                 "name": "evaluate_candidate",
-                "description": "Evaluate a complete candidate.py program on research-only causal data.",
+                "description": "Compare a complete candidate.py program with the champion on the archive week.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -170,11 +164,11 @@ class OpenAICodeResearcher:
             "objective": request.objective,
             "research_summary": request.research_summary,
             "previous_experiments": request.previous_experiments,
-            "current_candidate_source": request.current_source,
+            "current_champion_source": request.champion_source,
         }
         conversation: list[Any] = [{"role": "user", "content": json.dumps(prompt, default=str, sort_keys=True)}]
-        max_attempts = self.max_experiments * 2 + 2
-        max_rounds = max_attempts + self.max_experiments + 6
+        max_attempts = self.candidate_budget * 2 + 2
+        max_rounds = max_attempts + self.candidate_budget + 6
         for _ in range(max_rounds):
             response = self.client.responses.create(
                 model=self.model,
@@ -246,7 +240,7 @@ class OpenAICodeResearcher:
                     }
                 )
             conversation.extend(outputs)
-            if experiments >= self.max_experiments and best is not None:
+            if experiments >= self.candidate_budget and best is not None:
                 return best
         if best is not None:
             return best
