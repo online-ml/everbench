@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from everbench import event_store
-from everbench.schema import ArchiveManifest, BenchmarkEvent, BenchmarkLabel
+from everbench.schema import ArchiveManifest
 
 
 class ArchiveRecord(Protocol):
@@ -182,5 +182,16 @@ def replace_archive_manifests(
 
 def purge_archived_events(session: Session, task_name: str, event_ids: list[str]) -> None:
     """Only call after a manifest was committed for a durable archive target."""
-    for model in (BenchmarkLabel, BenchmarkEvent):
-        session.execute(delete(model).where(model.task_name == task_name, model.event_id.in_(event_ids)))
+    if not event_ids:
+        return
+    # Bind the IDs as one PostgreSQL array. Expanding a 100k-row archive batch
+    # into an IN clause exceeds PostgreSQL's 65,535 bind-parameter limit.
+    for table in ("benchmark_labels", "benchmark_events"):
+        session.execute(
+            text(
+                f"""DELETE FROM {table}
+                     WHERE task_name = :task_name
+                       AND event_id = ANY(CAST(:event_ids AS text[]))"""
+            ),
+            {"task_name": task_name, "event_ids": event_ids},
+        )

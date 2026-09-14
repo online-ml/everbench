@@ -16,7 +16,7 @@ from river import metrics
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench import archive, artifacts, event_store, model_store, reporting
+from everbench import archive, archive_store, artifacts, event_store, model_store, reporting
 from everbench.auto import store as auto_store
 from everbench.auto.everbench import complete_observations, iter_complete_observations
 from everbench.auto.service import _reset_generation_metrics
@@ -471,6 +471,15 @@ def test_event_completion_requires_a_model_checkpoint(sessions: sessionmaker[Ses
             ready.sequence,
         )
         assert event_store.completed_labelled_events(session, task_name, [event_id]) == [event_id]
+
+
+def test_archive_purge_accepts_more_than_postgres_parameter_limit(sessions: sessionmaker[Session]) -> None:
+    with sessions.begin() as session:
+        archive_store.purge_archived_events(
+            session,
+            f"large-archive-purge-test-{uuid4()}",
+            [f"event-{index}" for index in range(65_536)],
+        )
 
 
 def test_stream_cursor_is_updated_atomically(sessions: sessionmaker[Session]) -> None:
