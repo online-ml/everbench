@@ -40,7 +40,10 @@ class RuntimeConfig:
     max_model_bytes: int = 10 * 1024 * 1024
     max_class_definition_bytes: int = 100 * 1024
     model_checkpoint_seconds: float = 60.0
-    max_model_snapshot_bytes: int = 20 * 1024 * 1024
+    # The runtime ceiling is deliberately higher than any auto-research
+    # promotion ceiling. That gap lets a bounded online model grow between
+    # research cycles without making its durable checkpoints fail.
+    max_model_snapshot_bytes: int = 32 * 1024 * 1024
     max_active_models_per_task: int = 20
     model_retry_initial_seconds: float = 1.0
     model_retry_max_seconds: float = 1_800.0

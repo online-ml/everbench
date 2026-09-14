@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive, archive_store, artifacts, model_store
@@ -25,9 +25,10 @@ from everbench.auto.code_researcher import (
 from everbench.auto.config import AutoResearchConfig
 from everbench.auto.dataset import PreparedTemporalData
 from everbench.auto.everbench import EverbenchAutoClassifier, complete_observations, iter_complete_observations
-from everbench.auto.research import Candidate
+from everbench.auto.research import Candidate, ConstraintResult
 from everbench.config import CONFIG
 from everbench.heartbeat import Heartbeat
+from everbench.metrics import MetricTracker
 from everbench.schema import AutoExperiment, ModelRegistration
 from everbench.tasks import TaskDefinition
 
@@ -79,6 +80,45 @@ def _payload(auto_classifier: AutoClassifier) -> bytes:
     return payload
 
 
+def _with_model_size_constraint(outcome: Any, max_bytes: int) -> Any:
+    """Attach deployability evidence to an evaluated candidate."""
+    candidate_bytes = len(artifacts.dumps(outcome.trained_candidate))
+    constraint = ConstraintResult(
+        name="serialized_model_size",
+        passed=candidate_bytes <= max_bytes,
+        detail=f"{candidate_bytes:,} bytes <= {max_bytes:,} bytes",
+    )
+    evaluation = replace(
+        outcome.evaluation,
+        constraints=outcome.evaluation.constraints + (constraint,),
+    )
+    return replace(outcome, evaluation=evaluation)
+
+
+def _reset_generation_metrics(session: Session, task: TaskDefinition, model_id: str) -> None:
+    """Start leaderboard metrics at the promoted generation boundary."""
+    session.execute(
+        text(
+            """UPDATE benchmark_model_events
+                  SET evaluated_at = now()
+                WHERE task_name = :task_name AND model_id = :model_id
+                  AND prediction_status = 'predicted' AND evaluated_at IS NULL"""
+        ),
+        {"task_name": task.TASK_NAME, "model_id": model_id},
+    )
+    tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
+    model_store.save_metric_state(
+        session,
+        task.TASK_NAME,
+        model_id,
+        tracker.definition,
+        tracker.payload(),
+        tracker.predictions,
+        tracker.observations,
+        tracker.values(),
+    )
+
+
 def _source_for_registration(session: Session, registration: ModelRegistration) -> str:
     if registration.artifact_id is None:
         raise RuntimeError(f"auto model registration artifact missing for {registration.model_id}")
@@ -114,6 +154,12 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
     # stream's initial positive-only feedback window.
     for observation in sorted(observations, key=lambda row: (row.available_at, row.sequence)):
         auto_classifier.learn_one(observation.x, observation.y)
+    initial_model_bytes = len(artifacts.dumps(auto_classifier.model))
+    if initial_model_bytes > config.max_candidate_model_bytes:
+        raise ValueError(
+            f"serialized bootstrap model is {initial_model_bytes:,} bytes; "
+            f"auto promotion limit is {config.max_candidate_model_bytes:,} bytes"
+        )
     payload = _payload(auto_classifier)
     last = max(observations, key=lambda row: (row.label_available_at, row.sequence))
     with sessions.begin() as session:
@@ -276,9 +322,11 @@ def _reflect_prepared_once(
         len(split.research) - inner_promotion_size,
         stop=len(split.research),
     )
+    objective_description = describe_objective(snapshot.objective)
+    objective_description["max_serialized_model_bytes"] = config.max_candidate_model_bytes
     research_request = ResearchRequest(
         context=snapshot.context,
-        objective=describe_objective(snapshot.objective),
+        objective=objective_description,
         research_summary=summary,
         current_source=current_source,
         previous_experiments=_past_experiments(recent),
@@ -308,29 +356,35 @@ def _reflect_prepared_once(
         experiment_id = experiment.experiment_id
 
     def research_evaluate(source: str) -> dict[str, Any]:
-        outcome = evaluate_candidate_source(
-            source,
-            snapshot.champion,
-            inner_split,
-            snapshot.objective,
-            max_prediction_time_ratio=config.max_prediction_time_ratio,
-            timeout_seconds=config.candidate_timeout_seconds,
-            max_source_bytes=config.max_candidate_source_bytes,
-            max_output_bytes=CONFIG.max_model_snapshot_bytes,
+        outcome = _with_model_size_constraint(
+            evaluate_candidate_source(
+                source,
+                snapshot.champion,
+                inner_split,
+                snapshot.objective,
+                max_prediction_time_ratio=config.max_prediction_time_ratio,
+                timeout_seconds=config.candidate_timeout_seconds,
+                max_source_bytes=config.max_candidate_source_bytes,
+                max_output_bytes=CONFIG.max_model_snapshot_bytes,
+            ),
+            config.max_candidate_model_bytes,
         )
         return _evaluation(outcome, config)
 
     try:
         code_proposal = backend.research(research_request, research_evaluate)
-        outcome = evaluate_candidate_source(
-            code_proposal.source,
-            snapshot.champion,
-            split,
-            snapshot.objective,
-            max_prediction_time_ratio=config.max_prediction_time_ratio,
-            timeout_seconds=config.candidate_timeout_seconds,
-            max_source_bytes=config.max_candidate_source_bytes,
-            max_output_bytes=CONFIG.max_model_snapshot_bytes,
+        outcome = _with_model_size_constraint(
+            evaluate_candidate_source(
+                code_proposal.source,
+                snapshot.champion,
+                split,
+                snapshot.objective,
+                max_prediction_time_ratio=config.max_prediction_time_ratio,
+                timeout_seconds=config.candidate_timeout_seconds,
+                max_source_bytes=config.max_candidate_source_bytes,
+                max_output_bytes=CONFIG.max_model_snapshot_bytes,
+            ),
+            config.max_candidate_model_bytes,
         )
         promoted = auto_classifier.consider(
             Candidate(
@@ -383,6 +437,7 @@ def _reflect_prepared_once(
                     outcome.checkpoint_event_sequence,
                     None,
                 )
+                _reset_generation_metrics(session, task, config.model_id)
             store.finish_experiment(
                 experiment,
                 status="promoted" if promoted else "rejected",

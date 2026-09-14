@@ -28,6 +28,7 @@ class AutoResearchConfig:
     research_evaluation_observations: int = 5_000
     max_research_experiments: int = 6
     max_candidate_source_bytes: int = 100 * 1024
+    max_candidate_model_bytes: int = 16 * 1024 * 1024
     candidate_timeout_seconds: float = 180.0
     retain_raw_examples: bool = False
 
@@ -43,6 +44,7 @@ class AutoResearchConfig:
             "research_evaluation_observations": self.research_evaluation_observations,
             "max_research_experiments": self.max_research_experiments,
             "max_candidate_source_bytes": self.max_candidate_source_bytes,
+            "max_candidate_model_bytes": self.max_candidate_model_bytes,
             "candidate_timeout_seconds": self.candidate_timeout_seconds,
         }
         invalid = [name for name, value in positive.items() if value <= 0]

@@ -19,13 +19,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from everbench import archive, artifacts, event_store, model_store, reporting
 from everbench.auto import store as auto_store
 from everbench.auto.everbench import complete_observations, iter_complete_observations
+from everbench.auto.service import _reset_generation_metrics
 from everbench.config import CONFIG
 from everbench.db import make_session_factory
 from everbench.learner import learn_once
+from everbench.metrics import MetricTracker
 from everbench.schema import (
     ArchiveManifest,
     BenchmarkEvent,
     BenchmarkLabel,
+    MetricState,
     ModelEventState,
     ModelRegistration,
     ReadyLabel,
@@ -323,6 +326,65 @@ def test_model_detail_uses_autonomous_candidate_source(sessions: sessionmaker[Se
 
     assert detail is not None
     assert detail["class_definition"] == source
+
+
+def test_auto_promotion_starts_fresh_generation_metrics(sessions: sessionmaker[Session]) -> None:
+    task_name = f"auto-metric-generation-test-{uuid4()}"
+    task = cast(
+        TaskDefinition,
+        SimpleNamespace(
+            TASK_NAME=task_name,
+            PROBLEM_TYPE="binary_classification",
+            METRICS=(metrics.Accuracy(),),
+        ),
+    )
+    with sessions.begin() as session:
+        payload = artifacts.dumps(WorkingModel())
+        artifact = model_store.store_artifact(session, payload, artifacts.sign(payload), {})
+        model_store.register_model(session, task_name, "auto", "test", artifact.artifact_id)
+        event_store.add_events(
+            session,
+            task_name,
+            [
+                ("old-pending", datetime.now(UTC).timestamp(), {"value": 1.0}),
+                ("old-scored", datetime.now(UTC).timestamp(), {"value": 2.0}),
+            ],
+        )
+        event_store.add_predictions(
+            session,
+            task_name,
+            "auto",
+            [("old-pending", 0.5), ("old-scored", 0.5)],
+        )
+        event_store.add_metric_updates(session, task_name, "auto", ["old-scored"])
+        tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS, predictions=2)
+        tracker.update(True, True)
+        model_store.save_metric_state(
+            session,
+            task_name,
+            "auto",
+            tracker.definition,
+            tracker.payload(),
+            tracker.predictions,
+            tracker.observations,
+            tracker.values(),
+        )
+
+        _reset_generation_metrics(session, task, "auto")
+
+    with sessions() as session:
+        state = session.get(MetricState, {"task_name": task_name, "model_id": "auto"})
+        assert state is not None
+        assert state.predictions == 0
+        assert state.observations == 0
+        assert state.values == {"Accuracy": 0.0}
+        rows = session.scalars(
+            select(ModelEventState).where(
+                ModelEventState.task_name == task_name,
+                ModelEventState.model_id == "auto",
+            )
+        ).all()
+        assert all(row.evaluated_at is not None for row in rows)
 
 
 def test_auto_model_detail_updates_from_research_without_changing_champion(sessions: sessionmaker[Session]) -> None:

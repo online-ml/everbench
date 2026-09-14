@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +15,7 @@ from everbench.auto import (
 )
 from everbench.auto.code_researcher import summarize_research
 from everbench.auto.dataset import PreparedTemporalData
+from everbench.auto.service import _with_model_size_constraint
 
 
 class LabelCountClassifier(base.Classifier):
@@ -101,3 +103,29 @@ def test_evaluation_preserves_delayed_feedback() -> None:
     assert outcome.evaluation.champion_score == outcome.evaluation.candidate_score
     assert isinstance(outcome.trained_candidate, LabelCountClassifier)
     assert outcome.trained_candidate.learned == 2
+
+
+def test_serialized_model_size_is_required_promotion_evidence() -> None:
+    objective = Objective(
+        metrics.Accuracy(),
+        required_constraints=("serialized_model_size",),
+    )
+    outcome = evaluate_temporally(
+        LabelCountClassifier(),
+        LabelCountClassifier(),
+        temporal_split(observations(), promotion_observations=2),
+        objective,
+    )
+    outcome = replace(
+        outcome,
+        evaluation=replace(outcome.evaluation, champion_score=0.0, candidate_score=1.0),
+    )
+
+    constrained = _with_model_size_constraint(outcome, max_bytes=1)
+    within_limit = _with_model_size_constraint(outcome, max_bytes=1_000_000)
+
+    size = constrained.evaluation.constraints[-1]
+    assert size.name == "serialized_model_size"
+    assert not size.passed
+    assert not objective.accepts(constrained.evaluation)
+    assert objective.accepts(within_limit.evaluation)
