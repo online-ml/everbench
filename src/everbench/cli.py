@@ -154,6 +154,21 @@ def migrate() -> None:
         engine.dispose()
 
 
+@main.command("register-tasks")
+@click.option(
+    "--tasks-directory",
+    default="tasks",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+)
+@click.option("--task", "task_names", multiple=True, help="Register only the named task (repeatable).")
+def register_tasks_command(tasks_directory: str, task_names: tuple[str, ...]) -> None:
+    """Register deployed task definitions for the dashboard."""
+    tasks = discover_tasks(tasks_directory, task_names)
+    with make_session_factory().begin() as session:
+        reporting.register_tasks(session, [task.TASK_NAME for task in tasks])
+
+
 @debug.command("collect-labels")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 def collect_labels_command(task_file: str) -> None:

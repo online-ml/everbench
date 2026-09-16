@@ -159,6 +159,20 @@ def test_task_stats_include_archives_and_exclude_orphan_labels(sessions: session
         assert reporting.task_stats(session, task_name) == {"events": 8, "labels": 8}
 
 
+def test_task_names_are_registered_once_and_sorted(sessions: sessionmaker[Session]) -> None:
+    prefix = f"task-names-{uuid4()}"
+    first, second = (f"{prefix}-{suffix}" for suffix in ("a", "b"))
+    with sessions.begin() as session:
+        reporting.register_tasks(session, [second, first])
+        reporting.register_tasks(session, [first])
+
+    with sessions() as session:
+        names = reporting.task_names(session)
+
+    assert names == sorted(set(names))
+    assert {first, second} <= set(names)
+
+
 def test_failed_model_does_not_block_healthy_model(sessions: sessionmaker[Session]) -> None:
     task_name = f"model-test-{uuid4()}"
     task = SimpleNamespace(

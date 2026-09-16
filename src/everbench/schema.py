@@ -33,6 +33,14 @@ class Base(DeclarativeBase):
     pass
 
 
+class TaskRegistration(Base):
+    """Task definitions available to the deployed control plane."""
+
+    __tablename__ = "benchmark_tasks"
+
+    task_name: Mapped[str] = mapped_column(String, primary_key=True)
+
+
 class BenchmarkEvent(Base):
     __tablename__ = "benchmark_events"
     __table_args__ = (

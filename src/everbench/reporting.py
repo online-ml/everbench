@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from everbench.auto import store as auto_store
 from everbench.auto.documentation import documented_source
-from everbench.schema import AutoExperiment, WorkerHeartbeat
+from everbench.schema import AutoExperiment, TaskRegistration, WorkerHeartbeat
 
 
 def record_heartbeat(
@@ -37,17 +37,18 @@ def worker_health(session: Session) -> list[WorkerHeartbeat]:
 
 
 def task_names(session: Session) -> list[str]:
-    """Tasks known to operational state, including idle registered tasks."""
-    rows = session.execute(
-        text(
-            """SELECT task_name FROM benchmark_events
-               UNION SELECT task_name FROM benchmark_labels
-               UNION SELECT task_name FROM benchmark_models
-               UNION SELECT task_name FROM worker_heartbeats WHERE task_name IS NOT NULL
-               ORDER BY task_name"""
+    """List task definitions registered by a service at startup."""
+    return list(session.scalars(select(TaskRegistration.task_name).order_by(TaskRegistration.task_name)))
+
+
+def register_tasks(session: Session, task_names: list[str]) -> None:
+    """Make startup registration safe when web and worker services start together."""
+    if task_names:
+        session.execute(
+            insert(TaskRegistration)
+            .values([{"task_name": task_name} for task_name in task_names])
+            .on_conflict_do_nothing(index_elements=["task_name"])
         )
-    )
-    return [task_name for (task_name,) in rows]
 
 
 def task_stats(session: Session, task_name: str) -> dict[str, int]:
@@ -57,10 +58,7 @@ def task_stats(session: Session, task_name: str) -> dict[str, int]:
                 """SELECT
                  (SELECT COUNT(*) FROM benchmark_events WHERE task_name = :task_name)
                    + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS events,
-                 (SELECT COUNT(*)
-                    FROM benchmark_labels AS label
-                    JOIN benchmark_events AS event USING (task_name, event_id)
-                   WHERE label.task_name = :task_name)
+                 (SELECT COUNT(*) FROM benchmark_ready_labels WHERE task_name = :task_name)
                    + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS labels"""
             ),
             {"task_name": task_name},

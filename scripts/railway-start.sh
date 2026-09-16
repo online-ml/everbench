@@ -6,15 +6,18 @@ set -eu
 # the service network before either begins work; the command holds a Postgres
 # advisory lock, so concurrent starts cannot race.
 .venv/bin/everbench migrate
+TASK_NAME="${EVERBENCH_TASK_NAME:-wiki-liftwing}"
 
 case "${EVERBENCH_SERVICE_ROLE:-web}" in
     web)
+        .venv/bin/everbench register-tasks --task "$TASK_NAME"
         export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-3}"
         exec .venv/bin/gunicorn --bind "0.0.0.0:${PORT:-8000}" "everbench.api:create_app()"
         ;;
     worker)
+        .venv/bin/everbench register-tasks --task "$TASK_NAME"
         export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-6}"
-        exec .venv/bin/everbench worker-all --task wiki-liftwing
+        exec .venv/bin/everbench worker-all --task "$TASK_NAME"
         ;;
     researcher)
         export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-2}"
