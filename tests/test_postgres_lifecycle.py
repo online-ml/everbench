@@ -111,6 +111,7 @@ def test_archive_removes_predictions_before_events(
     with sessions() as session:
         assert session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id}) is None
         assert session.get(BenchmarkLabel, {"task_name": task_name, "event_id": event_id}) is None
+        assert reporting.task_stats(session, task_name) == {"events": 1, "labels": 1}
         assert (
             session.get(
                 ModelEventState,
@@ -154,6 +155,13 @@ def test_task_stats_include_archives_and_exclude_orphan_labels(sessions: session
                 byte_size=1,
             )
         )
+
+    with sessions() as session:
+        assert reporting.task_stats(session, task_name) == {"events": 8, "labels": 8}
+
+    with sessions.begin() as session:
+        event_store.add_events(session, task_name, [("live", datetime.now(UTC).timestamp(), {"value": 1.0})])
+        event_store.add_labels(session, task_name, [event_store.LabelInput("live", 1, "test")], delay_seconds=None)
 
     with sessions() as session:
         assert reporting.task_stats(session, task_name) == {"events": 8, "labels": 8}

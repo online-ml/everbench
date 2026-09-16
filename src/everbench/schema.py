@@ -39,6 +39,8 @@ class TaskRegistration(Base):
     __tablename__ = "benchmark_tasks"
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
+    live_events: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    live_labels: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
 
 class BenchmarkEvent(Base):
