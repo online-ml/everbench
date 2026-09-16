@@ -32,6 +32,7 @@ class TaskDefinition:
     DESCRIPTION_HTML: str
     __file__: str
     NEGATIVE_LABEL_DELAY_SECONDS: float | None = None
+    LEADERBOARD_PRIMARY_METRIC: str | None = None
     event_stream: Callable[[Event], Iterable[dict[str, Any]]] | None = None
     label_stream: Callable[[Event], Iterable[dict[str, Any]]] | None = None
     event_timestamp: Callable[[dict[str, Any]], float] | None = None
@@ -92,6 +93,9 @@ def _load_task(task_path: Path) -> TaskDefinition:
         raise ValueError("DESCRIPTION_HTML must be a string")
     metrics = tuple(module.METRICS)
     metric_definition(module.PROBLEM_TYPE, metrics)
+    primary_metric = getattr(module, "LEADERBOARD_PRIMARY_METRIC", None)
+    if primary_metric is not None and primary_metric not in {type(metric).__name__ for metric in metrics}:
+        raise ValueError("LEADERBOARD_PRIMARY_METRIC must name a configured metric")
     delay = getattr(module, "NEGATIVE_LABEL_DELAY_SECONDS", None)
     if delay is not None and module.PROBLEM_TYPE != "binary_classification":
         raise ValueError("NEGATIVE_LABEL_DELAY_SECONDS is only supported for binary_classification tasks")
@@ -117,6 +121,7 @@ def _load_task(task_path: Path) -> TaskDefinition:
         DESCRIPTION_HTML=module.DESCRIPTION_HTML,
         __file__=str(task_path),
         NEGATIVE_LABEL_DELAY_SECONDS=float(delay) if delay is not None else None,
+        LEADERBOARD_PRIMARY_METRIC=primary_metric,
         event_stream=event_stream,
         label_stream=label_stream,
         event_timestamp=_optional_callable(module, "event_timestamp"),

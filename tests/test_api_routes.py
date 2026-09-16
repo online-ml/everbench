@@ -9,6 +9,8 @@ from flask.testing import FlaskClient
 from river import metrics
 
 from everbench import api, archive_store, reporting
+from everbench.metrics import MetricTracker, metric_definition
+from everbench.tasks import load_task
 
 
 @pytest.fixture
@@ -135,6 +137,26 @@ def test_lower_is_better_first_metric_sorts_ascending() -> None:
 
     assert [row["model_id"] for row in view["leaderboard"]] == ["low", "high", "missing"]
     assert view["leaderboard_metrics"] == [{"name": "LogLoss", "bigger_is_better": False}]
+
+
+def test_wiki_primary_metric_sorts_without_changing_saved_metric_configuration() -> None:
+    task = load_task("tasks/wiki_liftwing/task.py")
+    saved = MetricTracker.fresh(
+        task.PROBLEM_TYPE, (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
+    )
+    MetricTracker.restore(metric_definition(task.PROBLEM_TYPE, task.METRICS), saved.payload())
+
+    view = api.leaderboard_view(
+        [
+            {"model_id": "accurate", "metrics": {"Accuracy": 0.9, "ROCAUC": 0.7}},
+            {"model_id": "best_auc", "metrics": {"Accuracy": 0.8, "ROCAUC": 0.9}},
+        ],
+        task.METRICS,
+        task.LEADERBOARD_PRIMARY_METRIC,
+    )
+
+    assert view["leaderboard_metrics"][0]["name"] == "ROCAUC"
+    assert [row["model_id"] for row in view["leaderboard"]] == ["best_auc", "accurate"]
 
 
 def test_failure_icon_is_rendered_outside_the_scrollable_table(

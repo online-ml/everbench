@@ -156,7 +156,9 @@ MEDALS = (
 )
 
 
-def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, ...]) -> dict[str, Any]:
+def leaderboard_view(
+    rows: list[dict[str, Any]], configured_metrics: tuple[Any, ...], primary_metric: str | None = None
+) -> dict[str, Any]:
     """Add metric placements and apply the task's natural default ordering."""
     metrics = [
         {
@@ -165,6 +167,8 @@ def leaderboard_view(rows: list[dict[str, Any]], configured_metrics: tuple[Any, 
         }
         for metric in configured_metrics
     ]
+    if primary_metric is not None:
+        metrics.sort(key=lambda metric: metric["name"] != primary_metric)
     cutoff = datetime.now(UTC) - timedelta(days=3)
 
     def is_recent(row: dict[str, Any]) -> bool:
@@ -235,7 +239,9 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
             hot_store = candidate if isinstance(candidate, dict) else None
         except ValueError:
             hot_store = None
-    leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
+    leaderboard = leaderboard_view(
+        reporting.task_leaderboard(session, task_name), task.METRICS, task.LEADERBOARD_PRIMARY_METRIC
+    )
     return {
         "stats": reporting.task_stats(session, task_name),
         **leaderboard,
