@@ -34,7 +34,7 @@ class Base(DeclarativeBase):
 
 
 class TaskRegistration(Base):
-    """Task definitions available to the deployed control plane."""
+    """Known task names and exact counts of their live Postgres rows."""
 
     __tablename__ = "benchmark_tasks"
 

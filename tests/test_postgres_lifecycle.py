@@ -29,6 +29,7 @@ from everbench.schema import (
     ModelEventState,
     ModelRegistration,
     ReadyLabel,
+    TaskRegistration,
 )
 from everbench.tasks import TaskDefinition
 
@@ -179,6 +180,50 @@ def test_task_names_are_registered_once_and_sorted(sessions: sessionmaker[Sessio
 
     assert names == sorted(set(names))
     assert {first, second} <= set(names)
+
+
+def test_task_counts_follow_committed_matched_events(sessions: sessionmaker[Session]) -> None:
+    task_name = f"counter-lifecycle-test-{uuid4()}"
+    with sessions.begin() as session:
+        event_store.add_labels(session, task_name, [event_store.LabelInput("first", 1, "early")], delay_seconds=None)
+
+    with sessions() as session:
+        assert reporting.task_stats(session, task_name) == {"events": 0, "labels": 0}
+
+    with sessions.begin() as session:
+        event_store.add_events(
+            session,
+            task_name,
+            [("first", datetime.now(UTC).timestamp(), {}), ("second", datetime.now(UTC).timestamp(), {})],
+        )
+
+    with sessions() as session:
+        assert reporting.task_stats(session, task_name) == {"events": 2, "labels": 1}
+
+    with pytest.raises(RuntimeError, match="roll back"):
+        with sessions.begin() as session:
+            event_store.add_events(session, task_name, [("third", datetime.now(UTC).timestamp(), {})])
+            raise RuntimeError("roll back")
+
+    with sessions.begin() as session:
+        event = session.get(BenchmarkEvent, {"task_name": task_name, "event_id": "first"})
+        assert event is not None
+        session.delete(event)
+
+    with sessions() as session:
+        assert reporting.task_stats(session, task_name) == {"events": 1, "labels": 0}
+        assert session.get(BenchmarkLabel, {"task_name": task_name, "event_id": "first"}) is not None
+
+
+def test_task_stats_reflect_writes_in_the_same_session(sessions: sessionmaker[Session]) -> None:
+    task_name = f"counter-session-test-{uuid4()}"
+    with sessions.begin() as session:
+        reporting.register_tasks(session, [task_name])
+        task = session.get(TaskRegistration, task_name)
+        assert task is not None
+        assert reporting.task_stats(session, task_name) == {"events": 0, "labels": 0}
+        event_store.add_events(session, task_name, [("event", datetime.now(UTC).timestamp(), {})])
+        assert reporting.task_stats(session, task_name) == {"events": 1, "labels": 0}
 
 
 def test_failed_model_does_not_block_healthy_model(sessions: sessionmaker[Session]) -> None:

@@ -37,7 +37,7 @@ def worker_health(session: Session) -> list[WorkerHeartbeat]:
 
 
 def task_names(session: Session) -> list[str]:
-    """List task definitions registered by a service at startup."""
+    """List task names registered at startup or first accepted event."""
     return list(session.scalars(select(TaskRegistration.task_name).order_by(TaskRegistration.task_name)))
 
 
@@ -52,15 +52,21 @@ def register_tasks(session: Session, task_names: list[str]) -> None:
 
 
 def task_stats(session: Session, task_name: str) -> dict[str, int]:
-    task = session.get(TaskRegistration, task_name)
-    archives = session.scalar(
-        text("SELECT COALESCE(SUM(row_count), 0) FROM archive_manifest WHERE task_name = :task_name"),
-        {"task_name": task_name},
+    row = (
+        session.execute(
+            text(
+                """SELECT COALESCE(task.live_events, 0) + archived.row_count AS events,
+                      COALESCE(task.live_labels, 0) + archived.row_count AS labels
+                 FROM (SELECT COALESCE(SUM(row_count), 0) AS row_count
+                         FROM archive_manifest WHERE task_name = :task_name) AS archived
+                 LEFT JOIN benchmark_tasks AS task ON task.task_name = :task_name"""
+            ),
+            {"task_name": task_name},
+        )
+        .mappings()
+        .one()
     )
-    return {
-        "events": (task.live_events if task else 0) + int(archives or 0),
-        "labels": (task.live_labels if task else 0) + int(archives or 0),
-    }
+    return {"events": int(row["events"]), "labels": int(row["labels"])}
 
 
 def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
