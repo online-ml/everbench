@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache, wraps
@@ -235,9 +237,18 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
             hot_store = candidate if isinstance(candidate, dict) else None
         except ValueError:
             hot_store = None
-    leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
+    started = time.monotonic()
+    try:
+        leaderboard = leaderboard_view(reporting.task_leaderboard(session, task_name), task.METRICS)
+    finally:
+        logging.warning("dashboard leaderboard query task=%s elapsed=%.3fs", task_name, time.monotonic() - started)
+    started = time.monotonic()
+    try:
+        stats = reporting.task_stats(session, task_name)
+    finally:
+        logging.warning("dashboard stats query task=%s elapsed=%.3fs", task_name, time.monotonic() - started)
     return {
-        "stats": reporting.task_stats(session, task_name),
+        "stats": stats,
         **leaderboard,
         "hot_store": hot_store,
     }
