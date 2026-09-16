@@ -20,7 +20,7 @@ DESCRIPTION_HTML = """
 <p>Predict whether an English Wikipedia article edit receives MediaWiki’s <code>mw-reverted</code> tag within 48 hours. Edits without that tag by the deadline receive a negative label.</p>
 """
 PROBLEM_TYPE = "binary_classification"
-METRICS = (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
+METRICS = (metrics.ROCAUC(), metrics.Accuracy(), metrics.F1(), metrics.LogLoss())
 EVENT_STREAM_URL = "https://stream.wikimedia.org/v2/stream/recentchange"
 LABEL_STREAM_URL = "https://stream.wikimedia.org/v2/stream/mediawiki.revision-tags-change"
 WIKI = "enwiki"
