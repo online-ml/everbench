@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -52,21 +54,21 @@ def register_tasks(session: Session, task_names: list[str]) -> None:
 
 
 def task_stats(session: Session, task_name: str) -> dict[str, int]:
-    row = (
-        session.execute(
-            text(
-                """SELECT
-                 (SELECT COUNT(*) FROM benchmark_events WHERE task_name = :task_name)
-                   + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS events,
-                 (SELECT COUNT(*) FROM benchmark_ready_labels WHERE task_name = :task_name)
-                   + COALESCE((SELECT SUM(row_count) FROM archive_manifest WHERE task_name = :task_name), 0) AS labels"""
-            ),
-            {"task_name": task_name},
-        )
-        .mappings()
-        .one()
+    started = time.monotonic()
+    events = session.scalar(
+        text("SELECT COUNT(*) FROM benchmark_events WHERE task_name = :task_name"), {"task_name": task_name}
     )
-    return {key: int(value) for key, value in row.items()}
+    logging.warning("dashboard event count task=%s elapsed=%.3fs", task_name, time.monotonic() - started)
+    started = time.monotonic()
+    labels = session.scalar(
+        text("SELECT COUNT(*) FROM benchmark_ready_labels WHERE task_name = :task_name"), {"task_name": task_name}
+    )
+    logging.warning("dashboard label count task=%s elapsed=%.3fs", task_name, time.monotonic() - started)
+    archives = session.scalar(
+        text("SELECT COALESCE(SUM(row_count), 0) FROM archive_manifest WHERE task_name = :task_name"),
+        {"task_name": task_name},
+    )
+    return {"events": int(events or 0) + int(archives or 0), "labels": int(labels or 0) + int(archives or 0)}
 
 
 def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
