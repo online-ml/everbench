@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive_store, artifacts, model_store
+from everbench.archive import archive_cutoff
 from everbench.auto import store
 from everbench.auto.classifier import AutoClassifier
 from everbench.auto.code_execution import build_candidate_model, evaluate_candidate_source
@@ -128,12 +129,12 @@ def _source_for_registration(session: Session, registration: ModelRegistration) 
     return source
 
 
-def _latest_archive_week(session: Session, task_name: str) -> tuple[date, ArchiveManifest] | None:
-    cutoff = datetime.now(UTC) - timedelta(days=CONFIG.archive_after_days)
-    week_start = archive_store.latest_complete_archive_week(session, task_name, cutoff)
+def _latest_archive_week(session: Session, task: TaskDefinition) -> tuple[date, ArchiveManifest] | None:
+    cutoff = archive_cutoff(task, datetime.now(UTC), CONFIG.archive_after_days)
+    week_start = archive_store.latest_complete_archive_week(session, task.TASK_NAME, cutoff)
     if week_start is None:
         return None
-    manifest = archive_store.archive_for_week(session, task_name, week_start)
+    manifest = archive_store.archive_for_week(session, task.TASK_NAME, week_start)
     if manifest is None:
         return None
     return week_start, manifest
@@ -151,7 +152,7 @@ def _bootstrap_auto_model(sessions: sessionmaker[Session], task: TaskDefinition)
         if existing is not None:
             auto_classifier, _ = _load_auto(session, existing)
             return AutoRunReport(task.TASK_NAME, config.model_id, None, "existing", auto_classifier.generation)
-        archived_week = _latest_archive_week(session, task.TASK_NAME)
+        archived_week = _latest_archive_week(session, task)
     source = config.seed_path.read_text()
     initial_model = build_candidate_model(
         source,
@@ -294,7 +295,7 @@ def _reflect_once(
             registration_artifact_id = registration.artifact_id
             if registration_artifact_id is None:
                 raise RuntimeError(f"auto model registration artifact missing for {config.model_id}")
-            archived_week = _latest_archive_week(session, task.TASK_NAME)
+            archived_week = _latest_archive_week(session, task)
             if archived_week is None:
                 raise NoNewPromotionEvidence("waiting for a complete archive week")
             week_start, manifest = archived_week

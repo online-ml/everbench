@@ -27,7 +27,9 @@ class RuntimeConfig:
     hot_event_capacity: int = 250_000
     hot_event_max_bytes: int = 512 * 1024
     shutdown_flush_seconds: float = 20.0
-    archive_after_days: int = 7
+    # Minimum hold after a UTC week ends. The task's delayed-label window plus
+    # one day may require a longer hold.
+    archive_after_days: int = 1
     archive_interval_seconds: float = 3_600.0
     archive_root: Path | None = None
     s3_bucket_name: str | None = None

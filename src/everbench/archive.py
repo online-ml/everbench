@@ -211,6 +211,13 @@ def archive_week_closed(week_start: date, cutoff: datetime) -> bool:
     return cutoff >= week_end
 
 
+def archive_cutoff(task: TaskDefinition, now: datetime, minimum_days: int) -> datetime:
+    """Wait for delayed labels and one extra day after a UTC week closes."""
+    label_delay = timedelta(seconds=task.NEGATIVE_LABEL_DELAY_SECONDS or 0)
+    retention = max(label_delay + timedelta(days=1), timedelta(days=minimum_days))
+    return now - retention
+
+
 def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """Archive one complete availability week into one Parquet file.
 
@@ -220,7 +227,7 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """
     if not storage_configured():
         raise RuntimeError("configure S3_BUCKET_NAME or EVERBENCH_ARCHIVE_ROOT for durable archives")
-    cutoff = datetime.now(UTC) - timedelta(days=CONFIG.archive_after_days)
+    cutoff = archive_cutoff(task, datetime.now(UTC), CONFIG.archive_after_days)
     with sessions() as session:
         week_start = archive_store.next_archive_week(session, task.TASK_NAME, cutoff)
         if week_start is None:

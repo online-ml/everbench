@@ -106,8 +106,9 @@ def test_archive_removes_predictions_before_events(
         ),
     )
 
-    assert archive.archive_once(sessions, cast(TaskDefinition, SimpleNamespace(TASK_NAME=task_name))) == 1
-    assert archive.archive_once(sessions, cast(TaskDefinition, SimpleNamespace(TASK_NAME=task_name))) == 0
+    task = cast(TaskDefinition, SimpleNamespace(TASK_NAME=task_name, NEGATIVE_LABEL_DELAY_SECONDS=None))
+    assert archive.archive_once(sessions, task) == 1
+    assert archive.archive_once(sessions, task) == 0
 
     with sessions() as session:
         assert session.get(BenchmarkEvent, {"task_name": task_name, "event_id": event_id}) is None
