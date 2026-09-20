@@ -18,10 +18,9 @@ MAX_LATENESS_SECONDS = 120
 MAX_STALENESS_SECONDS = 120
 DESCRIPTION_HTML = """
 <p>Predict the number of available bikes at each NYC Citi Bike station 30 minutes ahead.
-Each regressor is one shared model trained across all stations.</p>
-<p>We poll the <a href="https://citibikenyc.com/system-data">official GBFS feed</a> every 15 minutes.
-The target is the first fresh station reading at or after +30 minutes, within a two-minute tolerance.
-Unavailable targets are excluded, never filled with zero. MAE and RMSE are measured in bikes.</p>
+Each regressor is one shared model trained across all stations.
+The <a href="https://citibikenyc.com/system-data">official GBFS feed</a> is polled every 15 minutes.
+The ground truth is the first fresh station reading at or after +30 minutes.</p>
 """
 
 
