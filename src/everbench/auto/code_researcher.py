@@ -34,7 +34,7 @@ and bounded parametric online models.
 """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ResearchRequest:
     """Everything the coding agent may inspect during one reflection."""
 
@@ -45,13 +45,13 @@ class ResearchRequest:
     previous_experiments: tuple[dict[str, Any], ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CodeProposal:
     hypothesis: str
     source: str
 
 
-def describe_objective(objective: Any) -> dict[str, Any]:
+def describe_objective(*, objective: Any) -> dict[str, Any]:
     return {
         "primary_metric": type(objective.metric).__name__,
         "bigger_is_better": objective.metric.bigger_is_better,
@@ -69,36 +69,36 @@ def describe_objective(objective: Any) -> dict[str, Any]:
     }
 
 
-def summarize_research(
-    observations: Sequence[ArchiveExample],
-) -> dict[str, Any]:
+def summarize_research(*, observations: Sequence[ArchiveExample]) -> dict[str, Any]:
     """Describe an archive week without copying observations into the prompt."""
     first = observations[0]
     last = observations[-1]
-    positive_counter = getattr(observations, "positive_count", None)
-    positives = (
-        int(positive_counter()) if callable(positive_counter) else sum(int(bool(row[3])) for row in observations)
-    )
+    labels = positives = 0
+    for row in observations:
+        if row.target is not None:
+            labels += 1
+            positives += int(bool(row.target))
     feature_types: dict[str, set[str]] = {}
 
-    def record(value: Any, path: str, depth: int = 0) -> None:
+    def record(*, value: Any, path: str, depth: int = 0) -> None:
         feature_types.setdefault(path or "$", set()).add(type(value).__name__)
         if depth >= 4:
             return
         if isinstance(value, dict):
             for key, child in value.items():
-                record(child, f"{path}.{key}" if path else str(key), depth + 1)
+                record(value=child, path=f"{path}.{key}" if path else str(key), depth=depth + 1)
         elif isinstance(value, list):
             for child in value[:5]:
-                record(child, f"{path}[]", depth + 1)
+                record(value=child, path=f"{path}[]", depth=depth + 1)
 
     for row in observations[: min(len(observations), 1_000)]:
-        record(row[2], "")
+        record(value=row.payload, path="")
     return {
         "observations": len(observations),
-        "positive_rate": positives / len(observations),
-        "available_from": first[4].isoformat(),
-        "available_to": last[4].isoformat(),
+        "labels": labels,
+        "positive_rate": positives / labels if labels else None,
+        "available_from": first.available_at.isoformat(),
+        "available_to": last.available_at.isoformat(),
         "payload_schema": {key: sorted(values) for key, values in sorted(feature_types.items())},
     }
 
@@ -108,6 +108,7 @@ class OpenAICodeResearcher:
 
     def __init__(
         self,
+        *,
         model: str = "gpt-5.6-terra",
         reasoning_effort: str = "high",
         candidate_budget: int = 6,
@@ -126,11 +127,7 @@ class OpenAICodeResearcher:
         self.response_timeout_seconds = response_timeout_seconds
         self.client: Any = client
 
-    def research(
-        self,
-        request: ResearchRequest,
-        evaluate: Callable[[str], dict[str, Any]],
-    ) -> CodeProposal:
+    def research(self, *, request: ResearchRequest, evaluate: Callable[..., dict[str, Any]]) -> CodeProposal:
         experiments = 0
         attempts = 0
         best: CodeProposal | None = None
@@ -211,7 +208,7 @@ class OpenAICodeResearcher:
                             raise ValueError("source must be a non-empty string")
                         if not isinstance(hypothesis, str) or not hypothesis.strip():
                             raise ValueError("hypothesis must be a non-empty string")
-                        result = {"ok": True, **evaluate(source)}
+                        result = {"ok": True, **evaluate(source=source)}
                         experiments += 1
                         constraints_value = result.get("constraints")
                         constraints = constraints_value if isinstance(constraints_value, list) else []

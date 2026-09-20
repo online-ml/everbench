@@ -3,251 +3,243 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from everbench.db import advisory_key
+from everbench.records import LabelInput, LabelledExample, Observation, PendingPrediction, ReadyObservation
 from everbench.schema import (
     BenchmarkEvent,
     BenchmarkLabel,
+    LabelSchedule,
     ModelEventState,
-    NegativeLabelSchedule,
     StreamCursor,
 )
+from everbench.tasks import LabelPolicy
 
 
-@dataclass(frozen=True)
-class LabelInput:
-    event_id: str
-    y: Any
-    reason: str
-    available_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-
-def lock_task_ingest(session: Session, task_name: str) -> None:
+def lock_task_ingest(*, session: Session, task_name: str) -> None:
     """Serialize a task's event, label, and horizon-finalizer writes."""
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": advisory_key("ingest", task_name)},
+        {"lock_key": advisory_key(parts=("ingest", task_name))},
     )
 
 
 def add_events(
-    session: Session,
-    task_name: str,
-    events: list[tuple[str, float, dict[str, Any]]],
-    delay_seconds: float | None = None,
+    *, session: Session, task_name: str, events: list[Observation], policy: LabelPolicy | None = None
 ) -> list[str]:
-    """Insert a collector batch and return the event IDs that became durable."""
+    """Persist observations and resolve earlier forecasts in the same transaction."""
     if not events:
         return []
-    values = [
-        {
-            "task_name": task_name,
-            "event_id": event_id,
-            "event_time": datetime.fromtimestamp(timestamp, UTC),
-            "event": event,
-        }
-        for event_id, timestamp, event in events
-    ]
     statement = (
         insert(BenchmarkEvent)
-        .values(values)
+        .values(
+            [
+                {
+                    "task_name": task_name,
+                    "event_id": event.event_id,
+                    "event_time": datetime.fromtimestamp(event.timestamp, UTC),
+                    "event": event.payload,
+                }
+                for event in events
+            ]
+        )
         .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
         .returning(BenchmarkEvent.event_id)
     )
-    inserted_event_ids = list(session.scalars(statement).all())
-    # A label can arrive before its event batch. Once the event is available,
-    # apply the configured positive-label horizon to that pending label too.
-    if delay_seconds is not None:
+    inserted = list(session.scalars(statement))
+    inserted_set = set(inserted)
+    accepted = [event for event in events if event.event_id in inserted_set]
+    if policy is not None and accepted:
+        # An inbox label may precede the observation. Apply its source-time
+        # horizon only to newly inserted observations, never to existing defaults.
         session.execute(
             text(
-                """DELETE FROM benchmark_labels AS label
-                   USING benchmark_events AS event
-                   WHERE label.task_name = :task_name
-                     AND label.event_id = ANY(CAST(:event_ids AS text[]))
-                     AND event.task_name = label.task_name AND event.event_id = label.event_id
-                     AND label.y = '1'::jsonb
-                     AND label.available_at
-                         > event.event_time + make_interval(secs => :delay_seconds)"""
+                """DELETE FROM benchmark_labels AS label USING benchmark_events AS event
+               WHERE event.task_name = :task AND label.task_name = event.task_name
+                 AND label.event_id = event.event_id AND event.event_id = ANY(:ids)
+                 AND label.available_at > event.event_time + make_interval(secs => :horizon)"""
             ),
-            {
-                "task_name": task_name,
-                "event_ids": inserted_event_ids,
-                "delay_seconds": delay_seconds,
-            },
+            {"task": task_name, "ids": inserted, "horizon": policy.delay_seconds + policy.tolerance_seconds},
         )
         session.execute(
-            text(
-                """INSERT INTO benchmark_negative_label_schedule (task_name, event_id, due_at)
-                   SELECT event.task_name, event.event_id,
-                          event.event_time + make_interval(secs => :delay_seconds)
-                     FROM benchmark_events AS event
-                     LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
-                    WHERE event.task_name = :task_name
-                      AND event.event_id = ANY(CAST(:event_ids AS text[]))
-                      AND label.event_id IS NULL
-                   ON CONFLICT (task_name, event_id) DO NOTHING"""
-            ),
-            {
-                "task_name": task_name,
-                "event_ids": inserted_event_ids,
-                "delay_seconds": delay_seconds,
-            },
+            insert(LabelSchedule)
+            .values(
+                [
+                    {
+                        "task_name": task_name,
+                        "event_id": event.event_id,
+                        "entity_key": event.entity_key,
+                        "target_at": datetime.fromtimestamp(event.timestamp + policy.delay_seconds, UTC),
+                        "due_at": datetime.fromtimestamp(event.timestamp + policy.close_after_seconds, UTC),
+                    }
+                    for event in accepted
+                ]
+            )
+            .on_conflict_do_nothing()
         )
-    _mark_ready_labels(session, task_name, inserted_event_ids)
-    return inserted_event_ids
+        match_forecasts(session=session, task_name=task_name, observations=accepted, policy=policy)
+    _mark_ready_labels(session=session, task_name=task_name, event_ids=inserted)
+    return inserted
 
 
-def _mark_ready_labels(session: Session, task_name: str, event_ids: list[str]) -> list[str]:
-    """Append newly matched event/label pairs to the learner's durable queue."""
+def _mark_ready_labels(*, session: Session, task_name: str, event_ids: list[str]) -> list[str]:
+    """Queue a resolution only once both its observation and outcome exist."""
     if not event_ids:
         return []
+    session.execute(
+        text(
+            """DELETE FROM benchmark_label_schedule AS schedule USING benchmark_labels AS label
+           WHERE schedule.task_name = :task AND label.task_name = schedule.task_name
+             AND label.event_id = schedule.event_id AND schedule.event_id = ANY(:ids)"""
+        ),
+        {"task": task_name, "ids": event_ids},
+    )
     return list(
         session.scalars(
             text(
-                """INSERT INTO benchmark_ready_labels (task_name, event_id)
-                   SELECT event.task_name, event.event_id
-                     FROM benchmark_events AS event
-                     JOIN benchmark_labels AS label USING (task_name, event_id)
-                    WHERE event.task_name = :task_name
-                      AND event.event_id = ANY(CAST(:event_ids AS text[]))
-                   ON CONFLICT (task_name, event_id) DO NOTHING
-                   RETURNING event_id"""
+                """INSERT INTO benchmark_ready_labels (task_name, event_id, has_target)
+           SELECT event.task_name, event.event_id, label.y <> 'null'::jsonb
+             FROM benchmark_events AS event JOIN benchmark_labels AS label USING (task_name, event_id)
+            WHERE event.task_name = :task AND event.event_id = ANY(:ids)
+           ON CONFLICT (task_name, event_id) DO NOTHING RETURNING event_id"""
             ),
-            {"task_name": task_name, "event_ids": event_ids},
+            {"task": task_name, "ids": event_ids},
         )
     )
 
 
-def ensure_negative_label_schedule(session: Session, task_name: str, delay_seconds: float | None) -> int:
-    """One-time/backfill safety net; steady-state inserts are handled with events."""
-    if delay_seconds is None:
-        return 0
-    inserted = session.scalars(
-        text(
-            """INSERT INTO benchmark_negative_label_schedule (task_name, event_id, due_at)
-               SELECT event.task_name, event.event_id,
-                      event.event_time + make_interval(secs => :delay_seconds)
-                 FROM benchmark_events AS event
-                 LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
-                WHERE event.task_name = :task_name AND label.event_id IS NULL
-               ON CONFLICT (task_name, event_id) DO NOTHING
-               RETURNING event_id"""
-        ),
-        {"task_name": task_name, "delay_seconds": delay_seconds},
-    )
-    return len(list(inserted))
+def match_forecasts(
+    *, session: Session, task_name: str, observations: list[Observation], policy: LabelPolicy
+) -> list[str]:
+    """A station snapshot supplies targets for pending forecasts of that station.
 
-
-def add_expired_negative_labels(session: Session, task_name: str, delay_seconds: float | None) -> list[str]:
-    if delay_seconds is None:
+    The entity/deadline index limits reads to the incoming snapshot's matching
+    window. No history scan, in-memory station history, or second poller is needed.
+    """
+    snapshots = [event for event in observations if event.entity_key is not None]
+    if not snapshots:
         return []
-    event_ids = list(
-        session.scalars(
-            text(
-                """WITH due AS (
-                     DELETE FROM benchmark_negative_label_schedule
-                      WHERE task_name = :task_name AND due_at <= now()
-                      RETURNING task_name, event_id
-                   )
-                   INSERT INTO benchmark_labels (task_name, event_id, y, reason)
-                   SELECT task_name, event_id, to_jsonb(0), 'not-positive-within-horizon'
-                     FROM due
-                   ON CONFLICT (task_name, event_id) DO NOTHING
-                   RETURNING event_id"""
-            ),
-            {"task_name": task_name},
-        ).all()
+    by_entity: dict[str, list[Observation]] = {}
+    for event in sorted(snapshots, key=lambda event: event.timestamp):
+        assert event.entity_key is not None
+        by_entity.setdefault(event.entity_key, []).append(event)
+    earliest = min(event.timestamp for event in snapshots) - policy.tolerance_seconds
+    latest = max(event.timestamp for event in snapshots)
+    schedules = session.scalars(
+        select(LabelSchedule).where(
+            LabelSchedule.task_name == task_name,
+            LabelSchedule.entity_key.in_(list(by_entity)),
+            LabelSchedule.target_at >= datetime.fromtimestamp(earliest, UTC),
+            LabelSchedule.target_at <= datetime.fromtimestamp(latest, UTC),
+        )
     )
-    _mark_ready_labels(session, task_name, event_ids)
-    return event_ids
+    labels = []
+    for schedule in schedules:
+        assert schedule.entity_key is not None
+        for snapshot in by_entity[schedule.entity_key]:
+            if 0 <= snapshot.timestamp - schedule.target_at.timestamp() <= policy.tolerance_seconds:
+                labels.append(LabelInput(event_id=schedule.event_id, y=snapshot.value, reason="forecast-snapshot"))
+                break
+    return add_labels(session=session, task_name=task_name, labels=labels)
 
 
-def purge_orphan_labels(session: Session, task_name: str, cutoff: datetime) -> int:
+def resolve_due(*, session: Session, task_name: str, policy: LabelPolicy | None, limit: int = 500) -> list[str]:
+    """Finalize a bounded batch of deadlines; None is an unavailable target."""
+    if policy is None:
+        return []
+    due = list(
+        session.scalars(
+            select(LabelSchedule.event_id)
+            .where(LabelSchedule.task_name == task_name, LabelSchedule.due_at <= func.now())
+            .order_by(LabelSchedule.due_at)
+            .limit(limit)
+        )
+    )
+    reason = "target-unavailable" if policy.default_label is None else "deadline-default"
+    return add_labels(
+        session=session,
+        task_name=task_name,
+        labels=[LabelInput(event_id=identifier, y=policy.default_label, reason=reason) for identifier in due],
+    )
+
+
+def purge_orphan_labels(*, session: Session, task_name: str, cutoff: datetime) -> int:
     """Bound the label inbox when a corresponding accepted event never arrives."""
     result = session.execute(
         text(
             """DELETE FROM benchmark_labels AS label
-                 WHERE label.task_name = :task_name AND label.inserted_at < :cutoff
-                   AND NOT EXISTS (
-                     SELECT 1 FROM benchmark_events AS event
-                      WHERE event.task_name = label.task_name AND event.event_id = label.event_id
-                   )
-               RETURNING label.event_id"""
+           WHERE label.task_name = :task AND label.inserted_at < :cutoff
+             AND NOT EXISTS (SELECT 1 FROM benchmark_events AS event
+                             WHERE event.task_name = label.task_name AND event.event_id = label.event_id)
+           RETURNING label.event_id"""
         ),
-        {"task_name": task_name, "cutoff": cutoff},
+        {"task": task_name, "cutoff": cutoff},
     )
     return len(list(result.scalars()))
 
 
-def add_labels(session: Session, task_name: str, labels: list[LabelInput], delay_seconds: float | None) -> list[str]:
-    """Insert a label-collector batch with one Postgres statement.
-
-    A positive label arriving after its configured horizon is ignored: the
-    delayed-negative finalizer is the authority once that horizon has passed.
-    """
+def add_labels(
+    *, session: Session, task_name: str, labels: list[LabelInput], policy: LabelPolicy | None = None
+) -> list[str]:
+    """Persist first resolutions; explicit source labels obey the task horizon."""
     if not labels:
         return []
-    if delay_seconds is not None:
+    if policy is not None:
         event_times = {
-            event_id: event_time
-            for event_id, event_time in session.execute(
+            identifier: timestamp
+            for identifier, timestamp in session.execute(
                 select(BenchmarkEvent.event_id, BenchmarkEvent.event_time).where(
                     BenchmarkEvent.task_name == task_name,
                     BenchmarkEvent.event_id.in_([label.event_id for label in labels]),
                 )
             )
-            if event_id is not None and event_time is not None
         }
         labels = [
             label
             for label in labels
             if label.event_id not in event_times
-            or label.y != 1
-            or label.available_at <= event_times[label.event_id] + timedelta(seconds=delay_seconds)
+            or label.available_at
+            <= event_times[label.event_id] + timedelta(seconds=policy.delay_seconds + policy.tolerance_seconds)
         ]
-        if not labels:
-            return []
-    values = [
-        {
-            "task_name": task_name,
-            "event_id": label.event_id,
-            "y": label.y,
-            "reason": label.reason,
-            "available_at": label.available_at,
-        }
-        for label in labels
-    ]
-    statement = (
-        insert(BenchmarkLabel)
-        .values(values)
-        .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
-        .returning(BenchmarkLabel.event_id)
-    )
-    inserted_event_ids = list(session.scalars(statement).all())
-    if inserted_event_ids:
-        session.execute(
-            delete(NegativeLabelSchedule).where(
-                NegativeLabelSchedule.task_name == task_name,
-                NegativeLabelSchedule.event_id.in_(inserted_event_ids),
+    if not labels:
+        return []
+    # A source batch can include retries for the same ID; first resolution wins.
+    unique = {label.event_id: label for label in reversed(labels)}
+    inserted = list(
+        session.scalars(
+            insert(BenchmarkLabel)
+            .values(
+                [
+                    {
+                        "task_name": task_name,
+                        "event_id": label.event_id,
+                        "y": label.y,
+                        "reason": label.reason,
+                        "available_at": label.available_at,
+                    }
+                    for label in unique.values()
+                ]
             )
+            .on_conflict_do_nothing(index_elements=["task_name", "event_id"])
+            .returning(BenchmarkLabel.event_id)
         )
-        _mark_ready_labels(session, task_name, inserted_event_ids)
-    return inserted_event_ids
+    )
+    _mark_ready_labels(session=session, task_name=task_name, event_ids=inserted)
+    return inserted
 
 
-def stream_cursor(session: Session, task_name: str, stream_name: str) -> str | None:
+def stream_cursor(*, session: Session, task_name: str, stream_name: str) -> str | None:
     row = session.get(StreamCursor, {"task_name": task_name, "stream_name": stream_name})
     return row.event_id if row else None
 
 
-def save_stream_cursor(session: Session, task_name: str, stream_name: str, event_id: str) -> None:
+def save_stream_cursor(*, session: Session, task_name: str, stream_name: str, event_id: str) -> None:
     session.execute(
         insert(StreamCursor)
         .values(task_name=task_name, stream_name=stream_name, event_id=event_id)
@@ -258,18 +250,13 @@ def save_stream_cursor(session: Session, task_name: str, stream_name: str, event
 
 
 def events_after_cursor(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    cursor_sequence: int,
-    start_sequence: int,
-    limit: int = 500,
-) -> list[tuple[str, int, bool, bool]]:
+    *, session: Session, task_name: str, model_id: str, cursor_sequence: int, start_sequence: int, limit: int = 500
+) -> list[PendingPrediction]:
     """Read each accepted event once per model using the event sequence index."""
     rows = session.execute(
         text(
             """SELECT event.event_id, event.sequence,
-                      label.event_id IS NOT NULL AS labelled,
+                      label.event_id IS NOT NULL AS resolved,
                       state.event_id IS NOT NULL AS has_state
                  FROM benchmark_events AS event
                  LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
@@ -290,23 +277,18 @@ def events_after_cursor(
             "limit": limit,
         },
     )
-    return [(event_id, sequence, labelled, has_state) for event_id, sequence, labelled, has_state in rows]
+    return [PendingPrediction(**row) for row in rows.mappings()]
 
 
 def ready_labels_after_cursor(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    cursor_sequence: int,
-    start_sequence: int,
-    limit: int = 500,
-) -> list[tuple[int, str, Any, datetime, int, Any, str | None, bool, bool]]:
+    *, session: Session, task_name: str, model_id: str, cursor_sequence: int, start_sequence: int, limit: int = 500
+) -> list[ReadyObservation]:
     """Read each matched label once per model from its compact append-only queue."""
     rows = session.execute(
         text(
-            """SELECT ready.sequence, ready.event_id, label.y, label.available_at, event.sequence,
+            """SELECT ready.sequence, ready.event_id, label.y AS target, label.available_at, event.sequence AS event_sequence,
                       state.prediction, state.prediction_status,
-                      state.evaluated_at IS NOT NULL, state.trained_at IS NOT NULL
+                      state.evaluated_at IS NOT NULL AS evaluated, state.trained_at IS NOT NULL AS trained
                  FROM benchmark_ready_labels AS ready
                  JOIN benchmark_events AS event USING (task_name, event_id)
                  JOIN benchmark_labels AS label USING (task_name, event_id)
@@ -327,66 +309,30 @@ def ready_labels_after_cursor(
             "limit": limit,
         },
     )
-    return [tuple(row) for row in rows]
+    return [ReadyObservation(**row) for row in rows.mappings()]
 
 
-def untrained_labels(
-    session: Session, task_name: str, model_id: str, limit: int = 500
-) -> list[tuple[str, Any, datetime, int]]:
-    rows = session.execute(
-        text(
-            """SELECT label.event_id, label.y, label.available_at, event.sequence
-               FROM benchmark_labels AS label
-               JOIN benchmark_events AS event USING (task_name, event_id)
-               JOIN benchmark_model_events AS model_event
-                 ON model_event.task_name = label.task_name AND model_event.event_id = label.event_id
-                 AND model_event.model_id = :model_id
-               WHERE label.task_name = :task_name
-                 AND model_event.trained_at IS NULL
-               ORDER BY label.available_at, event.sequence LIMIT :limit"""
-        ),
-        {"task_name": task_name, "model_id": model_id, "limit": limit},
-    )
-    return [(event_id, y, available_at, sequence) for event_id, y, available_at, sequence in rows]
-
-
-def unevaluated_labels(session: Session, task_name: str, model_id: str, limit: int = 500) -> list[tuple[str, Any, Any]]:
-    """Return labelled predictions not yet incorporated into River metrics."""
-    rows = session.execute(
-        text(
-            """SELECT label.event_id, label.y, model_event.prediction
-               FROM benchmark_labels AS label
-               JOIN benchmark_events AS event USING (task_name, event_id)
-               JOIN benchmark_model_events AS model_event USING (task_name, event_id)
-               WHERE label.task_name = :task_name AND model_event.model_id = :model_id
-                 AND model_event.prediction_status = 'predicted'
-                 AND model_event.evaluated_at IS NULL
-               ORDER BY label.available_at, event.sequence LIMIT :limit"""
-        ),
-        {"task_name": task_name, "model_id": model_id, "limit": limit},
-    )
-    return [(event_id, y, prediction) for event_id, y, prediction in rows]
-
-
-def add_trainings(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> list[str]:
+def add_trainings(
+    *, session: Session, task_name: str, model_id: str, event_ids: list[str], skipped: bool = False
+) -> list[str]:
     if not event_ids:
         return []
     return list(
         session.scalars(
             text(
                 """UPDATE benchmark_model_events
-                     SET trained_at = now()
+                     SET trained_at = now(), training_skipped = :skipped
                    WHERE task_name = :task_name AND model_id = :model_id
                      AND event_id = ANY(CAST(:event_ids AS text[]))
                      AND trained_at IS NULL
                    RETURNING event_id"""
             ),
-            {"task_name": task_name, "model_id": model_id, "event_ids": event_ids},
+            {"task_name": task_name, "model_id": model_id, "event_ids": event_ids, "skipped": skipped},
         )
     )
 
 
-def add_metric_updates(session: Session, task_name: str, model_id: str, event_ids: list[str]) -> None:
+def add_metric_updates(*, session: Session, task_name: str, model_id: str, event_ids: list[str]) -> None:
     if event_ids:
         session.execute(
             text(
@@ -420,22 +366,12 @@ def _model_processing_pending_clause() -> str:
             JOIN benchmark_ready_labels AS ready
               ON ready.task_name = event.task_name AND ready.event_id = event.event_id
            WHERE snapshot.task_name = model.task_name AND snapshot.model_id = model.model_id
-             AND (
-               (snapshot.checkpoint_ready_sequence IS NOT NULL
-                AND snapshot.checkpoint_ready_sequence < ready.sequence)
-               OR
-               (snapshot.checkpoint_ready_sequence IS NULL AND (
-                 snapshot.checkpoint_label_available_at IS NULL
-                 OR snapshot.checkpoint_label_available_at < label.available_at
-                 OR (snapshot.checkpoint_label_available_at = label.available_at
-                     AND snapshot.checkpoint_event_sequence < event.sequence)
-               ))
-             )
+             AND snapshot.checkpoint_ready_sequence < ready.sequence
         )
     )"""
 
 
-def completed_labelled_events(session: Session, task_name: str, event_ids: list[str]) -> list[str]:
+def completed_labelled_events(*, session: Session, task_name: str, event_ids: list[str]) -> list[str]:
     """Find labelled events no eligible active model still needs to process."""
     if not event_ids:
         return []
@@ -463,7 +399,7 @@ def completed_labelled_events(session: Session, task_name: str, event_ids: list[
 
 
 def unpredicted_events(
-    session: Session, task_name: str, model_id: str, start_sequence: int, limit: int = 500
+    *, session: Session, task_name: str, model_id: str, start_sequence: int, limit: int = 500
 ) -> list[str]:
     rows = session.execute(
         text(
@@ -484,7 +420,7 @@ def unpredicted_events(
     return [event_id for (event_id,) in rows]
 
 
-def event_payloads(session: Session, task_name: str, event_ids: list[str]) -> dict[str, dict[str, Any]]:
+def event_payloads(*, session: Session, task_name: str, event_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Bulk database fallback for raw event cache misses."""
     if not event_ids:
         return {}
@@ -497,43 +433,23 @@ def event_payloads(session: Session, task_name: str, event_ids: list[str]) -> di
     return {event_id: event for event_id, event in rows}
 
 
-def latest_labelled_examples(session: Session, task_name: str, limit: int = 5) -> list[tuple[str, dict[str, Any], Any]]:
+def latest_labelled_examples(*, session: Session, task_name: str, limit: int = 5) -> list[LabelledExample]:
     """Read recent labelled events before archives are available for a task."""
     rows = session.execute(
         text(
             """SELECT event.event_id, event.event, label.y
                FROM benchmark_labels AS label
                JOIN benchmark_events AS event USING (task_name, event_id)
-               WHERE label.task_name = :task_name
+               WHERE label.task_name = :task_name AND label.y <> 'null'::jsonb
                ORDER BY label.available_at DESC, event.sequence DESC LIMIT :limit"""
         ),
         {"task_name": task_name, "limit": limit},
     )
-    return list(reversed([(event_id, event, y) for event_id, event, y in rows]))
-
-
-def labelled_unpredicted_events(
-    session: Session, task_name: str, model_id: str, start_sequence: int, limit: int = 500
-) -> list[str]:
-    """Events that became labelled before this model persisted a prediction."""
-    rows = session.execute(
-        text(
-            """SELECT event.event_id
-               FROM benchmark_events AS event
-               JOIN benchmark_labels AS label USING (task_name, event_id)
-               LEFT JOIN benchmark_model_events AS model_event
-                 ON model_event.task_name = event.task_name AND model_event.event_id = event.event_id
-                 AND model_event.model_id = :model_id
-               WHERE event.task_name = :task_name AND event.sequence >= :start_sequence
-                 AND model_event.event_id IS NULL
-               ORDER BY label.available_at, event.sequence LIMIT :limit"""
-        ),
-        {"task_name": task_name, "model_id": model_id, "start_sequence": start_sequence, "limit": limit},
-    )
-    return [event_id for (event_id,) in rows]
+    return list(reversed([LabelledExample(event_id=event_id, payload=event, target=y) for event_id, event, y in rows]))
 
 
 def add_prediction_skips(
+    *,
     session: Session,
     task_name: str,
     model_id: str,
@@ -563,7 +479,7 @@ def add_prediction_skips(
     return []
 
 
-def add_predictions(session: Session, task_name: str, model_id: str, predictions: list[tuple[str, Any]]) -> list[str]:
+def add_predictions(*, session: Session, task_name: str, model_id: str, predictions: dict[str, Any]) -> list[str]:
     """Persist only predictions whose label is still unavailable.
 
     The final label check happens in the INSERT statement, closing the race
@@ -571,7 +487,7 @@ def add_predictions(session: Session, task_name: str, model_id: str, predictions
     """
     if not predictions:
         return []
-    rows = json.dumps([{"event_id": event_id, "prediction": prediction} for event_id, prediction in predictions])
+    rows = json.dumps([{"event_id": event_id, "prediction": value} for event_id, value in predictions.items()])
     inserted = session.execute(
         text(
             """INSERT INTO benchmark_model_events

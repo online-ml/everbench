@@ -13,7 +13,7 @@ import cloudpickle
 from everbench.auto.evaluation import progressive_validate
 
 
-def _build(source: str):
+def _build(*, source: str):
     name = f"everbench_auto_candidate_{uuid4().hex}"
     module = ModuleType(name)
     module.__file__ = "candidate.py"
@@ -31,19 +31,19 @@ def _build(source: str):
     return model
 
 
-def main(request_path: Path, result_path: Path) -> None:
+def main(*, request_path: Path, result_path: Path) -> None:
     try:
         with request_path.open("rb") as request_file:
             request = cloudpickle.load(request_file)
-        model = _build(request["source"])
+        model = _build(source=request["source"])
         if request["operation"] == "build":
             value = model
         elif request["operation"] == "evaluate":
             value = progressive_validate(
-                request["champion"],
-                model,
-                request["observations"],
-                request["objective"],
+                champion=request["champion"],
+                candidate=model,
+                observations=request["observations"],
+                objective=request["objective"],
                 max_prediction_time_ratio=request["max_prediction_time_ratio"],
             )
         else:
@@ -58,4 +58,4 @@ def main(request_path: Path, result_path: Path) -> None:
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise SystemExit("usage: candidate_runtime REQUEST_PATH RESULT_PATH")
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    main(request_path=Path(sys.argv[1]), result_path=Path(sys.argv[2]))

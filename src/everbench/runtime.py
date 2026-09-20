@@ -9,22 +9,27 @@ import signal
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from types import FrameType
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench.archive import archive_once, storage_configured
-from everbench.collectors import collect_events, collect_labels
+from everbench.collectors import collect_source, maintain_resolutions
 from everbench.config import CONFIG
 from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
 from everbench.learner import learner
 from everbench.tasks import TaskDefinition
 
-Failure = tuple[str, BaseException]
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Failure:
+    name: str
+    error: BaseException
 
 
-def _log_failure(context: str, name: str, error: BaseException) -> None:
+def _log_failure(*, context: str, name: str, error: BaseException) -> None:
     logging.error(
         "%s %s failed",
         context,
@@ -34,7 +39,7 @@ def _log_failure(context: str, name: str, error: BaseException) -> None:
 
 
 def _supervised(
-    stop: threading.Event, failures: queue.SimpleQueue[Failure], name: str, target: Callable[[], None]
+    *, stop: threading.Event, failures: queue.SimpleQueue[Failure], name: str, target: Callable[[], None]
 ) -> Callable[[], None]:
     """Turn an unexpected thread exit into a process-level failure."""
 
@@ -44,19 +49,19 @@ def _supervised(
             if not stop.is_set():
                 raise RuntimeError(f"{name} stopped unexpectedly")
         except BaseException as error:
-            failures.put((name, error))
+            failures.put(Failure(name=name, error=error))
             stop.set()
 
     return run
 
 
 @contextmanager
-def _shutdown_signals(stop: threading.Event, enabled: bool):
+def _shutdown_signals(*, stop: threading.Event, enabled: bool):
     if not enabled:
         yield
         return
 
-    def request_stop(_: int, __: FrameType | None) -> None:
+    def request_stop(_: int, __: FrameType | None) -> None:  # noqa: PLR0917 -- external positional protocol
         logging.info("shutdown requested; draining in-memory batches")
         stop.set()
 
@@ -71,10 +76,10 @@ def _shutdown_signals(stop: threading.Event, enabled: bool):
 
 
 def _run_threads(
+    *,
     stop: threading.Event,
     failures: queue.SimpleQueue[Failure],
     threads: list[threading.Thread],
-    *,
     failure_context: str,
 ) -> None:
     """Start, monitor, and join a set of essential runtime threads."""
@@ -83,19 +88,19 @@ def _run_threads(
             thread.start()
         while any(thread.is_alive() for thread in threads):
             try:
-                name, error = failures.get(timeout=0.2)
+                failure = failures.get(timeout=0.2)
             except queue.Empty:
                 continue
-            _log_failure(failure_context, name, error)
+            _log_failure(context=failure_context, name=failure.name, error=failure.error)
             stop.set()
-            raise error
+            raise failure.error
         try:
-            name, error = failures.get_nowait()
+            failure = failures.get_nowait()
         except queue.Empty:
             pass
         else:
-            _log_failure(failure_context, name, error)
-            raise error
+            _log_failure(context=failure_context, name=failure.name, error=failure.error)
+            raise failure.error
     finally:
         stop.set()
         for thread in threads:
@@ -107,9 +112,9 @@ def _run_threads(
 
 
 def run_task(
+    *,
     sessions: sessionmaker[Session],
     task: TaskDefinition,
-    *,
     stop: threading.Event | None = None,
     install_signal_handlers: bool = True,
 ) -> None:
@@ -120,7 +125,7 @@ def run_task(
     in an essential loop stops the process so Railway can restart it.
     """
     stop = stop or threading.Event()
-    hot = HotStore(CONFIG.hot_event_capacity, CONFIG.hot_event_max_bytes)
+    hot = HotStore(capacity=CONFIG.hot_event_capacity, max_event_bytes=CONFIG.hot_event_max_bytes)
     failures: queue.SimpleQueue[Failure] = queue.SimpleQueue()
 
     def archive() -> None:
@@ -131,7 +136,7 @@ def run_task(
             return
         while not stop.is_set():
             try:
-                count = archive_once(sessions, task)
+                count = archive_once(sessions=sessions, task=task)
                 if count:
                     logging.info("archived one weekly file with %d %s events", count, task.TASK_NAME)
             except Exception:
@@ -142,33 +147,54 @@ def run_task(
     threads = [
         threading.Thread(
             target=_supervised(
-                stop, failures, "event collector", lambda: collect_events(sessions, task, stop, hot, heartbeat=False)
+                stop=stop,
+                failures=failures,
+                name=source.name,
+                target=lambda *, source=source: collect_source(
+                    sessions=sessions, task=task, source=source, stop=stop, hot=hot
+                ),
             ),
-            name="event-collector",
-        ),
-        threading.Thread(
-            target=_supervised(
-                stop, failures, "label collector", lambda: collect_labels(sessions, task, stop, hot, heartbeat=False)
-            ),
-            name="label-collector",
-        ),
-        threading.Thread(
-            target=_supervised(
-                stop, failures, "learner", lambda: learner(sessions, task, stop=stop, hot=hot, heartbeat=False)
-            ),
-            name="learner",
-        ),
-        threading.Thread(target=_supervised(stop, failures, "archiver", archive), name="archiver"),
+            name=source.name,
+        )
+        for source in task.sources
     ]
+    threads.extend(
+        [
+            threading.Thread(
+                target=_supervised(
+                    stop=stop,
+                    failures=failures,
+                    name="resolutions",
+                    target=lambda: maintain_resolutions(sessions=sessions, task=task, stop=stop, hot=hot),
+                ),
+                name="resolutions",
+            ),
+            threading.Thread(
+                target=_supervised(
+                    stop=stop,
+                    failures=failures,
+                    name="learner",
+                    target=lambda: learner(sessions=sessions, task=task, stop=stop, hot=hot, heartbeat=False),
+                ),
+                name="learner",
+            ),
+            threading.Thread(
+                target=_supervised(stop=stop, failures=failures, name="archiver", target=archive), name="archiver"
+            ),
+        ]
+    )
 
     def detail() -> str:
         return json.dumps({"hot_store": hot.stats()})
 
-    with _shutdown_signals(stop, install_signal_handlers), Heartbeat(sessions, task.TASK_NAME, "task-runtime", detail):
-        _run_threads(stop, failures, threads, failure_context="task runtime")
+    with (
+        _shutdown_signals(stop=stop, enabled=install_signal_handlers),
+        Heartbeat(sessions=sessions, task_name=task.TASK_NAME, role="task-runtime", detail=detail),
+    ):
+        _run_threads(stop=stop, failures=failures, threads=threads, failure_context="task runtime")
 
 
-def run_tasks(sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -> None:
+def run_tasks(*, sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -> None:
     """Run all task runtimes in one Railway worker process.
 
     One process lets each task keep its hot store in RAM, while the shared
@@ -181,15 +207,17 @@ def run_tasks(sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -> N
     stop = threading.Event()
     failures: queue.SimpleQueue[Failure] = queue.SimpleQueue()
 
-    def run(task: TaskDefinition) -> None:
+    def run(*, task: TaskDefinition) -> None:
         try:
-            run_task(sessions, task, stop=stop, install_signal_handlers=False)
+            run_task(sessions=sessions, task=task, stop=stop, install_signal_handlers=False)
             if not stop.is_set():
                 raise RuntimeError(f"task runtime {task.TASK_NAME!r} stopped unexpectedly")
         except BaseException as error:
-            failures.put((task.TASK_NAME, error))
+            failures.put(Failure(name=task.TASK_NAME, error=error))
             stop.set()
 
-    threads = [threading.Thread(target=run, args=(task,), name=f"task-runtime-{task.TASK_NAME}") for task in tasks]
-    with _shutdown_signals(stop, enabled=True):
-        _run_threads(stop, failures, threads, failure_context="task runtime")
+    threads = [
+        threading.Thread(target=run, kwargs={"task": task}, name=f"task-runtime-{task.TASK_NAME}") for task in tasks
+    ]
+    with _shutdown_signals(stop=stop, enabled=True):
+        _run_threads(stop=stop, failures=failures, threads=threads, failure_context="task runtime")

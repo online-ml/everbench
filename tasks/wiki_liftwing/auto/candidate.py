@@ -14,7 +14,7 @@ from typing import Any
 from river import compose, linear_model, optim, preprocessing
 
 
-def _number(value: Any) -> float:
+def _number(*, value: Any) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -22,7 +22,7 @@ def _number(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
-def _anonymous(user: Any) -> float:
+def _anonymous(*, user: Any) -> float:
     if not isinstance(user, str):
         return 0.0
     if user.startswith("~"):
@@ -34,18 +34,18 @@ def _anonymous(user: Any) -> float:
     return 1.0
 
 
-def features(event: dict[Any, Any]) -> dict[str, float]:
+def features(event: dict[Any, Any]) -> dict[str, float]:  # noqa: PLR0917 -- external positional protocol
     """Extract a small, legible baseline from the complete raw event."""
     lengths = event.get("length")
     lengths = lengths if isinstance(lengths, dict) else {}
-    old_length = _number(lengths.get("old"))
-    new_length = _number(lengths.get("new"))
+    old_length = _number(value=lengths.get("old"))
+    new_length = _number(value=lengths.get("new"))
     change = new_length - old_length
     comment = str(event.get("comment") or "")
     lower_comment = comment.casefold()
     user = event.get("user")
-    anonymous = _anonymous(user)
-    timestamp = _number(event.get("timestamp"))
+    anonymous = _anonymous(user=user)
+    timestamp = _number(value=event.get("timestamp"))
     moment = datetime.fromtimestamp(timestamp, UTC) if timestamp > 0 else datetime(1970, 1, 1, tzinfo=UTC)
     return {
         "anonymous": anonymous,

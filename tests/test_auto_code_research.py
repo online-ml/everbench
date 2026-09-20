@@ -18,6 +18,7 @@ from everbench.auto.code_execution import (
 )
 from everbench.auto.code_researcher import OpenAICodeResearcher, ResearchRequest
 from everbench.auto.dataset import ArchiveWeek
+from everbench.replay import ArchiveExample
 
 ENSEMBLE_SOURCE = """from river import compose, ensemble, linear_model
 
@@ -48,7 +49,7 @@ def build_model():
 
 def test_candidate_program_can_build_arbitrary_river_ensemble() -> None:
     model = build_candidate_model(
-        ENSEMBLE_SOURCE,
+        source=ENSEMBLE_SOURCE,
         timeout_seconds=10,
         max_source_bytes=10_000,
         max_output_bytes=2_000_000,
@@ -62,7 +63,7 @@ def test_candidate_program_can_build_arbitrary_river_ensemble() -> None:
 
 def test_candidate_program_can_build_a_stacking_meta_model() -> None:
     model = build_candidate_model(
-        STACKING_SOURCE,
+        source=STACKING_SOURCE,
         timeout_seconds=10,
         max_source_bytes=10_000,
         max_output_bytes=2_000_000,
@@ -75,7 +76,7 @@ def test_candidate_program_can_build_a_stacking_meta_model() -> None:
 def test_wiki_seed_is_a_self_contained_raw_event_model() -> None:
     source = (Path(__file__).parents[1] / "tasks/wiki_liftwing/auto/candidate.py").read_text()
     model = build_candidate_model(
-        source,
+        source=source,
         timeout_seconds=10,
         max_source_bytes=100_000,
         max_output_bytes=2_000_000,
@@ -96,42 +97,42 @@ def test_wiki_seed_is_a_self_contained_raw_event_model() -> None:
 
 def test_candidate_program_cannot_access_system_or_files() -> None:
     with pytest.raises(ValueError, match="import is not allowed"):
-        validate_candidate_source("import os\ndef build_model(): pass", 10_000)
+        validate_candidate_source(source="import os\ndef build_model(): pass", max_bytes=10_000)
     with pytest.raises(ValueError, match="call is not allowed"):
-        validate_candidate_source("def build_model():\n    return open('/etc/passwd')", 10_000)
+        validate_candidate_source(source="def build_model():\n    return open('/etc/passwd')", max_bytes=10_000)
 
 
 def test_candidate_program_cannot_use_models_that_retain_examples() -> None:
     with pytest.raises(ValueError, match="retain training examples"):
         validate_candidate_source(
-            "from river import neighbors\ndef build_model(): return neighbors.KNNClassifier()",
-            10_000,
+            source="from river import neighbors\ndef build_model(): return neighbors.KNNClassifier()",
+            max_bytes=10_000,
         )
 
 
 def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = tuple(
-        (
-            str(index),
-            index,
-            {"complete": {"nested": index}},
-            index % 2,
-            start + timedelta(seconds=index),
-            start + timedelta(seconds=index + 2),
+        ArchiveExample(
+            event_id=str(index),
+            sequence=index,
+            payload={"complete": {"nested": index}},
+            target=index % 2,
+            available_at=start + timedelta(seconds=index),
+            resolved_at=start + timedelta(seconds=index + 2),
         )
         for index in range(8)
     )
     outcome = evaluate_candidate_source(
-        ENSEMBLE_SOURCE,
-        build_candidate_model(
-            ENSEMBLE_SOURCE,
+        source=ENSEMBLE_SOURCE,
+        champion=build_candidate_model(
+            source=ENSEMBLE_SOURCE,
             timeout_seconds=10,
             max_source_bytes=10_000,
             max_output_bytes=2_000_000,
         ),
-        rows,
-        Objective(metrics.ROCAUC(), min_observations=3),
+        observations=rows,
+        objective=Objective(metric=metrics.ROCAUC(), min_observations=3),
         max_prediction_time_ratio=10.0,
         timeout_seconds=10,
         max_source_bytes=10_000,
@@ -139,24 +140,24 @@ def test_candidate_source_is_causally_evaluated_in_subprocess() -> None:
     )
 
     assert outcome.evaluation.observations == 8
-    assert outcome.checkpoint_event_sequence == 7
+    assert outcome.trained_candidate is not None
 
 
-def test_candidate_subprocess_streams_a_prepared_archive_week(tmp_path: Path) -> None:
+def test_candidate_subprocess_streams_a_prepared_archive_week(*, tmp_path: Path) -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = tuple(
-        (
-            str(index),
-            index,
-            {"complete": {"nested": index}},
-            index % 2,
-            start + timedelta(seconds=index),
-            start + timedelta(seconds=index + 2),
+        ArchiveExample(
+            event_id=str(index),
+            sequence=index,
+            payload={"complete": {"nested": index}},
+            target=index % 2,
+            available_at=start + timedelta(seconds=index),
+            resolved_at=start + timedelta(seconds=index + 2),
         )
         for index in range(8)
     )
     champion = build_candidate_model(
-        ENSEMBLE_SOURCE,
+        source=ENSEMBLE_SOURCE,
         timeout_seconds=10,
         max_source_bytes=10_000,
         max_output_bytes=2_000_000,
@@ -166,12 +167,12 @@ def test_candidate_subprocess_streams_a_prepared_archive_week(tmp_path: Path) ->
         pa.Table.from_pylist(
             [
                 {
-                    "event_id": row[0],
-                    "event_sequence": row[1],
-                    "payload_json": __import__("json").dumps(row[2]),
-                    "label": row[3],
-                    "event_available_at": row[4].isoformat(),
-                    "label_available_at": row[5].isoformat(),
+                    "event_id": row.event_id,
+                    "event_sequence": row.sequence,
+                    "payload_json": __import__("json").dumps(row.payload),
+                    "label": row.target,
+                    "event_available_at": row.available_at.isoformat(),
+                    "label_available_at": row.resolved_at.isoformat(),
                 }
                 for row in rows
             ]
@@ -179,12 +180,12 @@ def test_candidate_subprocess_streams_a_prepared_archive_week(tmp_path: Path) ->
         path,
     )
 
-    with ArchiveWeek(path, len(rows)) as prepared:
+    with ArchiveWeek(path=path, row_count=len(rows)) as prepared:
         outcome = evaluate_candidate_source(
-            ENSEMBLE_SOURCE,
-            champion,
-            prepared,
-            Objective(metrics.ROCAUC(), min_observations=3),
+            source=ENSEMBLE_SOURCE,
+            champion=champion,
+            observations=prepared,
+            objective=Objective(metric=metrics.ROCAUC(), min_observations=3),
             max_prediction_time_ratio=10.0,
             timeout_seconds=10,
             max_source_bytes=10_000,
@@ -192,7 +193,7 @@ def test_candidate_subprocess_streams_a_prepared_archive_week(tmp_path: Path) ->
         )
 
     assert outcome.evaluation.observations == 8
-    assert outcome.checkpoint_event_sequence == 7
+    assert outcome.trained_candidate is not None
 
 
 class FakeResponses:
@@ -227,8 +228,8 @@ def test_code_researcher_edits_evaluates_and_freezes_source() -> None:
     evaluated: list[str] = []
 
     proposal = researcher.research(
-        request,
-        lambda source: evaluated.append(source) or {"candidate_score": 0.75},
+        request=request,
+        evaluate=lambda source: evaluated.append(source) or {"candidate_score": 0.75},
     )
 
     assert proposal.source == ENSEMBLE_SOURCE
@@ -256,11 +257,13 @@ def test_code_researcher_prefers_a_constraint_passing_candidate() -> None:
         SimpleNamespace(type="function_call", name="finish", call_id="finish", arguments="{}"),
     ]
     researcher = OpenAICodeResearcher(client=SimpleNamespace(responses=responses), candidate_budget=3)
-    request = ResearchRequest({}, {"primary_metric": "ROCAUC"}, {}, ENSEMBLE_SOURCE)
+    request = ResearchRequest(
+        context={}, objective={"primary_metric": "ROCAUC"}, research_summary={}, champion_source=ENSEMBLE_SOURCE
+    )
 
     proposal = researcher.research(
-        request,
-        lambda source: {
+        request=request,
+        evaluate=lambda source: {
             "improvement": 0.2 if source == ENSEMBLE_SOURCE else 0.1,
             "constraints": [{"name": "latency", "passed": source == STACKING_SOURCE}],
         },

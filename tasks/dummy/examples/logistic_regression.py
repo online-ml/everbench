@@ -14,14 +14,14 @@ class DummyLogisticRegression:
         self.model = preprocessing.StandardScaler() | linear_model.LogisticRegression(optimizer=optim.SGD(0.05))
 
     @staticmethod
-    def transform(event: dict[str, Any]) -> dict[str, float]:
+    def transform(*, event: dict[str, Any]) -> dict[str, float]:
         value = float(event["value"])
         return {"value": value, "is_even": float(value % 2 == 0)}
 
-    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+    def predict_proba_one(self, *, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
         del event_id
-        return self.model.predict_proba_one(self.transform(event))
+        return self.model.predict_proba_one(self.transform(event=event))
 
-    def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
+    def learn_one(self, *, event_id: str, event: dict[str, Any], label: int) -> None:
         del event_id
-        self.model.learn_one(self.transform(event), bool(label))
+        self.model.learn_one(self.transform(event=event), bool(label))

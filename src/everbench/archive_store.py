@@ -13,7 +13,7 @@ from everbench import event_store
 from everbench.schema import ArchiveManifest
 
 
-def task_archives(session: Session, task_name: str) -> list[ArchiveManifest]:
+def task_archives(*, session: Session, task_name: str) -> list[ArchiveManifest]:
     return list(
         session.scalars(
             select(ArchiveManifest)
@@ -23,7 +23,7 @@ def task_archives(session: Session, task_name: str) -> list[ArchiveManifest]:
     )
 
 
-def task_archive(session: Session, task_name: str, content_sha256: str) -> ArchiveManifest | None:
+def task_archive(*, session: Session, task_name: str, content_sha256: str) -> ArchiveManifest | None:
     return session.scalar(
         select(ArchiveManifest).where(
             ArchiveManifest.task_name == task_name, ArchiveManifest.content_sha256 == content_sha256
@@ -31,7 +31,7 @@ def task_archive(session: Session, task_name: str, content_sha256: str) -> Archi
     )
 
 
-def archive_for_week(session: Session, task_name: str, event_date: date) -> ArchiveManifest | None:
+def archive_for_week(*, session: Session, task_name: str, event_date: date) -> ArchiveManifest | None:
     return session.scalar(
         select(ArchiveManifest).where(
             ArchiveManifest.task_name == task_name,
@@ -40,7 +40,7 @@ def archive_for_week(session: Session, task_name: str, event_date: date) -> Arch
     )
 
 
-def latest_complete_archive_week(session: Session, task_name: str, cutoff: datetime) -> date | None:
+def latest_complete_archive_week(*, session: Session, task_name: str, cutoff: datetime) -> date | None:
     """Return the newest closed availability week whose rows are archived."""
     return session.scalar(
         text(
@@ -63,7 +63,7 @@ def latest_complete_archive_week(session: Session, task_name: str, cutoff: datet
     )
 
 
-def next_archive_week(session: Session, task_name: str, cutoff: datetime) -> date | None:
+def next_archive_week(*, session: Session, task_name: str, cutoff: datetime) -> date | None:
     """Return the oldest UTC availability week old enough to archive."""
     return session.scalar(
         text(
@@ -76,7 +76,7 @@ def next_archive_week(session: Session, task_name: str, cutoff: datetime) -> dat
     )
 
 
-def archive_week_ready(session: Session, task_name: str, week_start: date) -> bool:
+def archive_week_ready(*, session: Session, task_name: str, week_start: date) -> bool:
     """Return whether every event in a closed availability week is complete."""
     incomplete = session.scalar(
         text(
@@ -106,7 +106,7 @@ def archive_week_ready(session: Session, task_name: str, week_start: date) -> bo
     return not bool(incomplete)
 
 
-def archive_rows(session: Session, task_name: str, week_start: date) -> list[dict[str, Any]]:
+def archive_rows(*, session: Session, task_name: str, week_start: date) -> list[dict[str, Any]]:
     """Load one complete availability week in deterministic replay order."""
     rows = session.execute(
         text(
@@ -131,7 +131,15 @@ def archive_rows(session: Session, task_name: str, week_start: date) -> list[dic
 
 
 def record_archive(
-    session: Session, content_sha256: str, task_name: str, event_date: date, path: str, row_count: int, byte_size: int
+    *,
+    session: Session,
+    content_sha256: str,
+    task_name: str,
+    event_date: date,
+    path: str,
+    row_count: int,
+    byte_size: int,
+    label_count: int | None = None,
 ) -> bool:
     inserted = session.scalar(
         insert(ArchiveManifest)
@@ -142,6 +150,7 @@ def record_archive(
             path=path,
             row_count=row_count,
             byte_size=byte_size,
+            label_count=row_count if label_count is None else label_count,
         )
         .on_conflict_do_nothing(constraint="archive_manifest_task_week_key")
         .returning(ArchiveManifest.content_sha256)
@@ -149,7 +158,7 @@ def record_archive(
     return inserted is not None
 
 
-def purge_archived_events(session: Session, task_name: str, event_ids: list[str]) -> None:
+def purge_archived_events(*, session: Session, task_name: str, event_ids: list[str]) -> None:
     """Only call after a manifest was committed for a durable archive target."""
     if not event_ids:
         return

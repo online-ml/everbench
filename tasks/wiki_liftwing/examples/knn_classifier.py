@@ -21,7 +21,7 @@ class WikiKNNClassifier:
         )
 
     @staticmethod
-    def transform(event: dict[str, Any]) -> dict[str, float]:
+    def transform(*, event: dict[str, Any]) -> dict[str, float]:
         change = event.get("length") or {}
         anonymous = float(bool(event.get("user_is_anon")))
         comment_length = float(len(event.get("comment") or ""))
@@ -39,15 +39,15 @@ class WikiKNNClassifier:
             "anonymous_short_comment": anonymous * float(comment_length < 10),
         }
 
-    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+    def predict_proba_one(self, *, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
         del event_id
-        probabilities = self.model.predict_proba_one(self.transform(event))
+        probabilities = self.model.predict_proba_one(self.transform(event=event))
         positive = float(probabilities.get(True, 0.0))
         return {False: 1.0 - positive, True: positive}
 
-    def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
+    def learn_one(self, *, event_id: str, event: dict[str, Any], label: int) -> None:
         del event_id
-        self.model.learn_one(self.transform(event), bool(label))
+        self.model.learn_one(self.transform(event=event), bool(label))
 
 
 def main() -> None:

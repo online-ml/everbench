@@ -7,13 +7,16 @@ Run it through the generic harness:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from river import metrics
 
 from everbench.auto.config import AutoResearchConfig
 from everbench.auto.research import MetricConstraint, Objective
+from everbench.records import LabelInput, Observation
+from everbench.sources import SSESource
+from everbench.tasks import LabelPolicy, TaskDefinition
 
 TASK_NAME = "wiki-liftwing"
 DESCRIPTION_HTML = """
@@ -25,18 +28,19 @@ LEADERBOARD_PRIMARY_METRIC = "ROCAUC"
 EVENT_STREAM_URL = "https://stream.wikimedia.org/v2/stream/recentchange"
 LABEL_STREAM_URL = "https://stream.wikimedia.org/v2/stream/mediawiki.revision-tags-change"
 WIKI = "enwiki"
-NEGATIVE_LABEL_DELAY_SECONDS = 48 * 60 * 60
 
 AUTO_RESEARCH = AutoResearchConfig(
     model_id="auto-river",
     owner="everbench-auto",
     seed_path=Path(__file__).with_name("auto") / "candidate.py",
     objective=Objective(
-        metrics.ROCAUC(),
+        metric=metrics.ROCAUC(),
         min_improvement=0.01,
         min_observations=100_000,
         required_constraints=("prediction_time_ratio", "serialized_model_size"),
-        metric_constraints=(MetricConstraint("log_loss_non_regression", metrics.LogLoss(), 0.01),),
+        metric_constraints=(
+            MetricConstraint(name="log_loss_non_regression", metric=metrics.LogLoss(), max_regression=0.01),
+        ),
     ),
     context={
         "problem_description": (
@@ -58,7 +62,7 @@ AUTO_RESEARCH = AutoResearchConfig(
 )
 
 
-def event_id(event: dict) -> str | None:
+def event_id(*, event: dict) -> str | None:
     """ID common to the edit and revision-tags-change event schemas."""
     wiki = event.get("wiki") or event.get("database")
     revision = (
@@ -70,16 +74,16 @@ def event_id(event: dict) -> str | None:
     return f"{wiki}:{revision}" if wiki is not None and revision is not None else None
 
 
-def accepts_event(event: dict) -> bool:
+def accepts_event(*, event: dict) -> bool:
     return (
         event.get("type") == "edit"
         and event.get("wiki") == WIKI
         and event.get("namespace") == 0
-        and event_id(event) is not None
+        and event_id(event=event) is not None
     )
 
 
-def label_timestamp(event: dict) -> float:
+def label_timestamp(*, event: dict) -> float:
     """Use source time so reconnect lag cannot turn a timely positive into a late one."""
     value = (event.get("meta") or {}).get("dt")
     if not isinstance(value, str):
@@ -87,22 +91,41 @@ def label_timestamp(event: dict) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def metric_inputs_for(metric: object, y_true: int, prediction: float) -> tuple[bool, bool | float]:
-    """Accuracy and F1 use a hard decision; ranking/loss metrics use probability."""
-    target = bool(y_true)
-    if isinstance(metric, (metrics.Accuracy, metrics.F1)):
-        return target, prediction >= 0.5
-    return target, prediction
-
-
-def label_for(event: dict) -> tuple[str, int, str] | None:
-    """Return a label emitted by the label stream, or ``None`` to ignore it."""
+def reversions(*, event: dict):
+    """Emit a resolution when an English edit gains the reverted tag."""
     current = event.get("tags") or []
     previous = (event.get("prior_state") or {}).get("tags") or []
     wiki = event.get("wiki") or event.get("database")
     if wiki != WIKI or not isinstance(current, list) or not isinstance(previous, list):
-        return None
+        return
     if "mw-reverted" not in set(current) - set(previous):
-        return None
-    key = event_id(event)
-    return (key, 1, "mw-reverted") if key is not None else None
+        return
+    identifier = event_id(event=event)
+    if identifier is not None:
+        yield LabelInput(
+            event_id=identifier,
+            y=1,
+            reason="mw-reverted",
+            available_at=datetime.fromtimestamp(label_timestamp(event=event), UTC),
+        )
+
+
+def edits(*, event: dict):
+    identifier = event_id(event=event)
+    if accepts_event(event=event) and identifier is not None:
+        yield Observation(event_id=identifier, timestamp=float(event["timestamp"]), payload=event)
+
+
+TASK = TaskDefinition(
+    TASK_NAME=TASK_NAME,
+    PROBLEM_TYPE=PROBLEM_TYPE,
+    METRICS=METRICS,
+    LEADERBOARD_PRIMARY_METRIC=LEADERBOARD_PRIMARY_METRIC,
+    DESCRIPTION_HTML=DESCRIPTION_HTML,
+    sources=(
+        SSESource(name="events", url=EVENT_STREAM_URL, decode=edits),
+        SSESource(name="labels", url=LABEL_STREAM_URL, decode=reversions),
+    ),
+    label_policy=LabelPolicy(delay_seconds=48 * 60 * 60, default_label=0),
+    AUTO_RESEARCH=AUTO_RESEARCH,
+)

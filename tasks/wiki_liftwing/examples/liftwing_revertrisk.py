@@ -26,11 +26,7 @@ class LiftWingRevertRisk:
     endpoint = "https://api.wikimedia.org/service/lw/inference/v1/models/revertrisk-language-agnostic:predict"
 
     def __init__(
-        self,
-        user_agent: str,
-        timeout_seconds: float = 1.5,
-        max_attempts: int = 2,
-        backoff_seconds: float = 0.25,
+        self, *, user_agent: str, timeout_seconds: float = 1.5, max_attempts: int = 2, backoff_seconds: float = 0.25
     ):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -43,7 +39,7 @@ class LiftWingRevertRisk:
         self.max_attempts = max_attempts
         self.backoff_seconds = backoff_seconds
 
-    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+    def predict_proba_one(self, *, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
         del event
         wiki, separator, revision_id = event_id.partition(":")
         if not separator or not wiki.endswith("wiki") or not revision_id.isdigit():
@@ -82,7 +78,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("liftwing.pkl"))
     args = parser.parse_args()
     try:
-        model = LiftWingRevertRisk(args.user_agent, args.timeout_seconds, args.max_attempts, args.backoff_seconds)
+        model = LiftWingRevertRisk(
+            user_agent=args.user_agent,
+            timeout_seconds=args.timeout_seconds,
+            max_attempts=args.max_attempts,
+            backoff_seconds=args.backoff_seconds,
+        )
     except ValueError as error:
         parser.error(str(error))
     args.output.write_bytes(cloudpickle.dumps(model))

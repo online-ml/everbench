@@ -14,9 +14,10 @@ Item = TypeVar("Item")
 class TimedBatch(Generic[Item]):
     def __init__(
         self,
+        *,
         max_items: int,
         max_age_seconds: float,
-        flush: Callable[[list[Item]], None],
+        flush: Callable[..., None],
         max_pending_items: int | None = None,
     ):
         self.max_items = max_items
@@ -27,7 +28,7 @@ class TimedBatch(Generic[Item]):
         self.opened_at = time.monotonic()
         self._lock = RLock()
 
-    def add(self, item: Item) -> None:
+    def add(self, *, item: Item) -> None:
         with self._lock:
             self.items.append(item)
             if len(self.items) > self.max_pending_items:
@@ -53,7 +54,7 @@ class TimedBatch(Generic[Item]):
         # collector can retry it (and inserts are idempotent) rather than
         # silently dropping events on a transient outage.
         try:
-            self.flush_callback(self.items)
+            self.flush_callback(items=self.items)
         except Exception:
             # Keep the batch for the next event-driven retry. A persistent
             # outage will still be visible in logs and Railway health checks.

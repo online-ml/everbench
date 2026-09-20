@@ -3,6 +3,24 @@
 Everbench evaluates evolving predictors against continuously arriving observations. Autonomous model research extends
 that domain with controlled proposals and evidence-based replacement of a serving predictor.
 
+## Live benchmarks
+
+**Observation**:
+A prediction request containing the information available at its forecast origin.
+_Avoid_: Training row, labelled sample
+
+**Resolution**:
+The final outcome of an observation: a known target or an explicitly unavailable target. Pending observations have no resolution yet.
+_Avoid_: Default negative, expired event
+
+**Forecast origin**:
+The moment at which the observation's input was measured. It determines the forecast's target time, independently of when processing completes.
+_Avoid_: Insertion time
+
+**Live generation**:
+One serving model version and the observations admitted after it begins serving. A promoted champion starts a new live generation while keeping its archive-trained serving state.
+_Avoid_: Catch-up window
+
 ## Autonomous model research
 
 **Champion**:
@@ -34,7 +52,7 @@ _Avoid_: Model artifact, training archive
 
 **Weekly comparison**:
 Measurements produced by replaying one archive week causally through fresh champion and candidate instances. The
-research agent may iterate on this same corpus; River's delayed progressive validation defines the replay semantics.
+research agent may iterate on this same corpus; predictions and learning respect the original observation and target availability times.
 It is not a separate holdout.
 _Avoid_: Sealed cohort, live score
 

@@ -11,7 +11,7 @@ from typing import Any
 class HotStore:
     """A bounded, defensive read cache; Postgres remains the source of truth."""
 
-    def __init__(self, capacity: int, max_event_bytes: int | None = None):
+    def __init__(self, *, capacity: int, max_event_bytes: int | None = None):
         if capacity < 1:
             raise ValueError("hot store capacity must be positive")
         if max_event_bytes is not None and max_event_bytes < 1:
@@ -31,7 +31,7 @@ class HotStore:
         self._bypasses = 0
         self._lock = RLock()
 
-    def put(self, event_id: str, event: dict[str, Any]) -> None:
+    def put(self, *, event_id: str, event: dict[str, Any]) -> None:
         """Cache JSON-sized payloads without sharing mutable references."""
         try:
             encoded = json.dumps(event, separators=(",", ":")).encode()
@@ -50,7 +50,7 @@ class HotStore:
             self._events.move_to_end(event_id)
             self._trim()
 
-    def mark_labelled(self, event_ids: list[str]) -> None:
+    def mark_labelled(self, *, event_ids: list[str]) -> None:
         """Remember newly durable labels until their cached events are settled."""
         with self._lock:
             for event_id in event_ids:
@@ -63,7 +63,7 @@ class HotStore:
         with self._lock:
             return list(self._labelled)
 
-    def discard(self, event_ids: list[str]) -> None:
+    def discard(self, *, event_ids: list[str]) -> None:
         """Release events that no active model needs in memory any longer."""
         with self._lock:
             for event_id in event_ids:
@@ -75,7 +75,7 @@ class HotStore:
             event_id, _ = self._events.popitem(last=False)
             self._labelled.pop(event_id, None)
 
-    def event(self, event_id: str) -> dict[str, Any] | None:
+    def event(self, *, event_id: str) -> dict[str, Any] | None:
         with self._lock:
             encoded = self._events.get(event_id)
             if encoded is None:

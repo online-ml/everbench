@@ -10,11 +10,13 @@ from everbench.schema import AutoExperiment
 
 
 @pytest.mark.parametrize("original", ["", '"""Existing model explanation: café."""\n', '""""""\n'])
-def test_research_docstring_preserves_valid_source_and_original_explanation(original: str) -> None:
+def test_research_docstring_preserves_valid_source_and_original_explanation(*, original: str) -> None:
     source = original + "from __future__ import annotations\n\ndef build_model():\n    return None\n"
     hypothesis = 'Try """quoted""" features and C:\\new weights.'
 
-    result = documented_source(source, {"generation": 3, "hypothesis": hypothesis}, [], {"promoted": 3})
+    result = documented_source(
+        source=source, metadata={"generation": 3, "hypothesis": hypothesis}, experiments=[], counts={"promoted": 3}
+    )
 
     compile(result, "candidate.py", "exec")
     doc = ast.get_docstring(ast.parse(result))
@@ -29,7 +31,9 @@ def test_research_docstring_preserves_valid_source_and_original_explanation(orig
 
 
 def test_bootstrap_notes_do_not_claim_a_successful_experiment() -> None:
-    result = documented_source("def build_model(): pass\n", {"generation": 0}, [], {})
+    result = documented_source(
+        source="def build_model(): pass\n", metadata={"generation": 0}, experiments=[], counts={}
+    )
 
     assert "generation 0" in result
     assert "no promoted changes yet" in result
@@ -37,7 +41,7 @@ def test_bootstrap_notes_do_not_claim_a_successful_experiment() -> None:
 
 
 def test_research_notes_distinguish_active_rejected_failed_and_promoted_rounds() -> None:
-    def experiment(status: str, **kwargs) -> AutoExperiment:
+    def experiment(*, status: str, **kwargs) -> AutoExperiment:
         return AutoExperiment(
             started_at=datetime(2026, 9, 8, 12, tzinfo=UTC),
             status=status,
@@ -55,15 +59,15 @@ def test_research_notes_distinguish_active_rejected_failed_and_promoted_rounds()
         "constraints": [{"name": "latency", "passed": False, "detail": "too slow"}],
     }
     result = documented_source(
-        "def build_model(): pass\n",
-        {"generation": 2, "hypothesis": "Use adaptive weights."},
-        [
-            experiment("running"),
-            experiment("failed", error="ValueError: invalid candidate"),
-            experiment("rejected", hypothesis="Try a larger ensemble.", evaluation=evaluation),
-            experiment("promoted", hypothesis="Use adaptive weights."),
+        source="def build_model(): pass\n",
+        metadata={"generation": 2, "hypothesis": "Use adaptive weights."},
+        experiments=[
+            experiment(status="running"),
+            experiment(status="failed", error="ValueError: invalid candidate"),
+            experiment(status="rejected", hypothesis="Try a larger ensemble.", evaluation=evaluation),
+            experiment(status="promoted", hypothesis="Use adaptive weights."),
         ],
-        {"promoted": 2, "rejected": 12, "failed": 1, "running": 1},
+        counts={"promoted": 2, "rejected": 12, "failed": 1, "running": 1},
     )
 
     assert "2 promoted, 12 rejected, 1 failed, 1 running" in result

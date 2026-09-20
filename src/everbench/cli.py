@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from alembic import command
 from everbench import artifacts, reporting
-from everbench.collectors import collect_events, collect_labels
+from everbench.collectors import collect_source
 from everbench.db import advisory_key, make_engine, make_session_factory
 from everbench.tasks import discover_tasks, load_task
 
@@ -32,20 +32,29 @@ def debug() -> None:
     """Run individual components for local diagnosis."""
 
 
-@debug.command("collect-events")
+@debug.command("collect")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def collect_events_command(task_file: str) -> None:
-    """Collect events requiring predictions for TASK_FILE."""
-    collect_events(make_session_factory(), load_task(task_file))
+@click.argument("source_name")
+def collect_command(*, task_file: str, source_name: str) -> None:
+    """Collect a named source from TASK_FILE."""
+    from threading import Event
+
+    task = load_task(path=task_file)
+    source = next((source for source in task.sources if source.name == source_name), None)
+    if source is None:
+        raise click.ClickException(
+            f"unknown source {source_name!r}; choose from {', '.join(s.name for s in task.sources)}"
+        )
+    collect_source(sessions=make_session_factory(), task=task, source=source, stop=Event())
 
 
 @debug.command("worker")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def worker(task_file: str) -> None:
+def worker(*, task_file: str) -> None:
     """Run a task's collectors and learner in one supervised process."""
     from everbench.runtime import run_task
 
-    run_task(make_session_factory(), load_task(task_file))
+    run_task(sessions=make_session_factory(), task=load_task(path=task_file))
 
 
 @main.command("worker-all")
@@ -56,11 +65,11 @@ def worker(task_file: str) -> None:
     type=click.Path(exists=True, file_okay=False, path_type=str),
 )
 @click.option("--task", "task_names", multiple=True, help="Run only the named task (repeatable).")
-def worker_all(tasks_directory: str, task_names: tuple[str, ...]) -> None:
+def worker_all(*, tasks_directory: str, task_names: tuple[str, ...]) -> None:
     """Run every top-level task definition in one supervised process."""
     from everbench.runtime import run_tasks
 
-    run_tasks(make_session_factory(), discover_tasks(tasks_directory, task_names))
+    run_tasks(sessions=make_session_factory(), tasks=discover_tasks(directory=tasks_directory, task_names=task_names))
 
 
 @main.group("auto")
@@ -70,21 +79,21 @@ def auto() -> None:
 
 @auto.command("bootstrap")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def auto_bootstrap(task_file: str) -> None:
+def auto_bootstrap(*, task_file: str) -> None:
     """Register and pre-train TASK_FILE's initial auto champion."""
     from everbench.auto.service import AutoResearchRunner
 
-    report = AutoResearchRunner(make_session_factory(), load_task(task_file)).bootstrap()
+    report = AutoResearchRunner(sessions=make_session_factory(), task=load_task(path=task_file)).bootstrap()
     click.echo(f"{report.task_name}/{report.model_id}: {report.status} {report.detail}".rstrip())
 
 
 @auto.command("reflect")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def auto_reflect(task_file: str) -> None:
+def auto_reflect(*, task_file: str) -> None:
     """Run one propose-evaluate-promote reflection for TASK_FILE."""
     from everbench.auto.service import AutoResearchRunner
 
-    report = AutoResearchRunner(make_session_factory(), load_task(task_file)).reflect()
+    report = AutoResearchRunner(sessions=make_session_factory(), task=load_task(path=task_file)).reflect()
     click.echo(
         f"{report.task_name}/{report.model_id}: {report.status} generation={report.generation} "
         f"experiment={report.experiment_id} {report.detail}".rstrip()
@@ -94,16 +103,18 @@ def auto_reflect(task_file: str) -> None:
 @auto.command("status")
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 @click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 100))
-def auto_status(task_file: str, limit: int) -> None:
+def auto_status(*, task_file: str, limit: int) -> None:
     """Show recent autonomous research experiments for TASK_FILE."""
     from everbench.auto import store as auto_store
 
-    task = load_task(task_file)
+    task = load_task(path=task_file)
     config = task.AUTO_RESEARCH
     if config is None:
         raise click.ClickException(f"task {task.TASK_NAME!r} does not configure autonomous research")
     with make_session_factory()() as session:
-        rows = auto_store.recent_experiments(session, task.TASK_NAME, config.model_id, limit)
+        rows = auto_store.recent_experiments(
+            session=session, task_name=task.TASK_NAME, model_id=config.model_id, limit=limit
+        )
     if not rows:
         click.echo(f"{task.TASK_NAME}/{config.model_id}: no experiments")
         return
@@ -125,11 +136,11 @@ def auto_status(task_file: str, limit: int) -> None:
     show_default=True,
     type=click.Path(exists=True, file_okay=False, path_type=str),
 )
-def auto_worker_all(tasks_directory: str) -> None:
+def auto_worker_all(*, tasks_directory: str) -> None:
     """Run one weekly research pass for every task that opts in."""
     from everbench.auto.service import auto_worker
 
-    auto_worker(make_session_factory(), discover_tasks(tasks_directory))
+    auto_worker(sessions=make_session_factory(), tasks=discover_tasks(directory=tasks_directory))
 
 
 @main.command()
@@ -144,7 +155,7 @@ def migrate() -> None:
     engine = make_engine()
     try:
         with engine.connect() as connection:
-            lock_id = advisory_key("migrations")
+            lock_id = advisory_key(parts=("migrations",))
             connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": lock_id})
             try:
                 command.upgrade(AlembicConfig(str(alembic_config)), "head")
@@ -162,38 +173,31 @@ def migrate() -> None:
     type=click.Path(exists=True, file_okay=False, path_type=str),
 )
 @click.option("--task", "task_names", multiple=True, help="Register only the named task (repeatable).")
-def register_tasks_command(tasks_directory: str, task_names: tuple[str, ...]) -> None:
+def register_tasks_command(*, tasks_directory: str, task_names: tuple[str, ...]) -> None:
     """Register deployed task definitions for the dashboard."""
-    tasks = discover_tasks(tasks_directory, task_names)
+    tasks = discover_tasks(directory=tasks_directory, task_names=task_names)
     with make_session_factory().begin() as session:
-        reporting.register_tasks(session, [task.TASK_NAME for task in tasks])
-
-
-@debug.command("collect-labels")
-@click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def collect_labels_command(task_file: str) -> None:
-    """Collect labels and finalise delayed negatives for TASK_FILE."""
-    collect_labels(make_session_factory(), load_task(task_file))
+        reporting.register_tasks(session=session, task_names=[task.TASK_NAME for task in tasks])
 
 
 @debug.command()
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
 @click.option("--once", is_flag=True, help="Run one learner cycle, then exit.")
-def learner(task_file: str, once: bool) -> None:
+def learner(*, task_file: str, once: bool) -> None:
     """Predict then train active models for TASK_FILE."""
-    task = load_task(task_file)
+    task = load_task(path=task_file)
     from everbench.learner import learner as run_learner
 
-    run_learner(make_session_factory(), task, once)
+    run_learner(sessions=make_session_factory(), task=task, once=once)
 
 
 @debug.command()
 @click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def report(task_file: str) -> None:
+def report(*, task_file: str) -> None:
     """Print persisted River metrics for TASK_FILE."""
-    task = load_task(task_file)
+    task = load_task(path=task_file)
     with make_session_factory()() as session:
-        rows = reporting.task_leaderboard(session, task.TASK_NAME)
+        rows = reporting.task_leaderboard(session=session, task_name=task.TASK_NAME)
     for row in rows:
         metrics = " ".join(f"{name}={value:.6f}" for name, value in row["metrics"].items() if value is not None)
         click.echo(f"{row['model_id']}: predictions={row['predictions']} labels={row['labels']} {metrics}".rstrip())
@@ -203,7 +207,7 @@ def report(task_file: str) -> None:
 @click.option("--host", default="0.0.0.0", show_default=True)
 @click.option("--port", default=lambda: int(os.getenv("PORT", "8000")), show_default=True)
 @click.option("--debug/--no-debug", default=True, show_default=True, help="Enable Flask's development reloader.")
-def api(host: str, port: int, debug: bool) -> None:
+def api(*, host: str, port: int, debug: bool) -> None:
     """Run the Flask API locally; use Gunicorn in production."""
     from everbench.api import create_app
 
@@ -212,11 +216,11 @@ def api(host: str, port: int, debug: bool) -> None:
 
 @debug.command("sign-model")
 @click.argument("model_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-def sign_model(model_file: Path) -> None:
+def sign_model(*, model_file: Path) -> None:
     """Print the SHA-256 and required upload signature for a pickle file."""
     payload = model_file.read_bytes()
-    click.echo(f"sha256={artifacts.sha256(payload)}")
-    click.echo(f"signature={artifacts.sign(payload)}")
+    click.echo(f"sha256={artifacts.sha256(payload=payload)}")
+    click.echo(f"signature={artifacts.sign(payload=payload)}")
 
 
 if __name__ == "__main__":

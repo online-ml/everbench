@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from everbench import artifacts, event_store
 from everbench.db import advisory_key
+from everbench.records import LabelledExample
 from everbench.schema import (
     AutoExperiment,
     BenchmarkEvent,
@@ -24,7 +26,7 @@ from everbench.schema import (
 )
 
 
-def runnable_registrations(session: Session, task_name: str) -> list[ModelRegistration]:
+def runnable_registrations(*, session: Session, task_name: str) -> list[ModelRegistration]:
     """Return manually active models whose retry window has elapsed."""
     return list(
         session.scalars(
@@ -40,7 +42,7 @@ def runnable_registrations(session: Session, task_name: str) -> list[ModelRegist
     )
 
 
-def disabled_registrations(session: Session, task_name: str) -> list[ModelRegistration]:
+def disabled_registrations(*, session: Session, task_name: str) -> list[ModelRegistration]:
     """Return active models currently paused by the circuit breaker."""
     return list(
         session.scalars(
@@ -57,11 +59,11 @@ def disabled_registrations(session: Session, task_name: str) -> list[ModelRegist
     )
 
 
-def model_metric_state(session: Session, task_name: str, model_id: str) -> MetricState | None:
+def model_metric_state(*, session: Session, task_name: str, model_id: str) -> MetricState | None:
     return session.get(MetricState, {"task_name": task_name, "model_id": model_id})
 
 
-def model_prediction_count(session: Session, task_name: str, model_id: str) -> int:
+def model_prediction_count(*, session: Session, task_name: str, model_id: str) -> int:
     return int(
         session.scalar(
             select(func.count())
@@ -77,6 +79,7 @@ def model_prediction_count(session: Session, task_name: str, model_id: str) -> i
 
 
 def save_metric_state(
+    *,
     session: Session,
     task_name: str,
     model_id: str,
@@ -113,11 +116,7 @@ def save_metric_state(
 
 
 def register_model(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    owner: str,
-    artifact_id: str,
+    *, session: Session, task_name: str, model_id: str, owner: str, artifact_id: str
 ) -> tuple[ModelRegistration, bool]:
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration:
@@ -147,15 +146,15 @@ def register_model(
     return registration, True
 
 
-def lock_model_registrations(session: Session, task_name: str) -> None:
+def lock_model_registrations(*, session: Session, task_name: str) -> None:
     """Serialize count-and-register operations for one task until transaction end."""
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_id)"),
-        {"lock_id": advisory_key("model-registration", task_name)},
+        {"lock_id": advisory_key(parts=("model-registration", task_name))},
     )
 
 
-def _delete_unreferenced_artifacts(session: Session, artifact_ids: set[str]) -> None:
+def _delete_unreferenced_artifacts(*, session: Session, artifact_ids: set[str]) -> None:
     if not artifact_ids:
         return
     registered_ids = select(ModelRegistration.artifact_id).where(ModelRegistration.artifact_id.is_not(None))
@@ -175,7 +174,7 @@ def _delete_unreferenced_artifacts(session: Session, artifact_ids: set[str]) -> 
     )
 
 
-def delete_model(session: Session, task_name: str, model_id: str) -> bool:
+def delete_model(*, session: Session, task_name: str, model_id: str) -> bool:
     """Remove a registration and all state that belongs only to that model."""
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration is None:
@@ -199,11 +198,12 @@ def delete_model(session: Session, task_name: str, model_id: str) -> bool:
     )
     session.delete(registration)
     session.flush()
-    _delete_unreferenced_artifacts(session, artifact_ids)
+    _delete_unreferenced_artifacts(session=session, artifact_ids=artifact_ids)
     return True
 
 
 def record_model_failure(
+    *,
     session: Session,
     task_name: str,
     model_id: str,
@@ -228,7 +228,7 @@ def record_model_failure(
     return registration.disabled_until
 
 
-def record_model_success(session: Session, task_name: str, model_id: str) -> None:
+def record_model_success(*, session: Session, task_name: str, model_id: str) -> None:
     registration = session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
     if registration is not None and registration.failure_count:
         registration.failure_count = 0
@@ -238,20 +238,13 @@ def record_model_success(session: Session, task_name: str, model_id: str) -> Non
 
 
 def advance_model_checkpoint(
-    session: Session,
-    task_name: str,
-    registration: ModelRegistration,
-    label_available_at: datetime,
-    event_sequence: int,
-    ready_sequence: int,
+    *, session: Session, task_name: str, registration: ModelRegistration, previous_sequence: int, ready_sequence: int
 ) -> None:
-    """Mark terminally skipped labels as covered by the model's checkpoint.
-
-    A paused model deliberately does not learn its skipped labels. Its current
-    artifact therefore remains the right restart state, while the watermark
-    prevents those terminal labels from indefinitely blocking weekly archival.
-    """
-    snapshot = latest_snapshot(session, task_name, registration.model_id)
+    """Advance a checkpoint across work that a disabled model deliberately skips."""
+    snapshot = latest_snapshot(session=session, task_name=task_name, model_id=registration.model_id)
+    # Never claim the saved pickle includes earlier learning that only lived in RAM.
+    if (snapshot.checkpoint_ready_sequence if snapshot is not None else 0) < previous_sequence:
+        return
     if snapshot is None:
         if registration.artifact_id is None:
             raise RuntimeError(f"model artifact missing for {registration.model_id}")
@@ -260,75 +253,122 @@ def advance_model_checkpoint(
                 task_name=task_name,
                 model_id=registration.model_id,
                 artifact_id=registration.artifact_id,
-                checkpoint_label_available_at=label_available_at,
-                checkpoint_event_sequence=event_sequence,
                 checkpoint_ready_sequence=ready_sequence,
             )
         )
-        return
+    else:
+        snapshot.checkpoint_ready_sequence = max(snapshot.checkpoint_ready_sequence, ready_sequence)
 
-    candidate = (label_available_at, event_sequence)
-    if (
-        snapshot.checkpoint_label_available_at is None
-        or snapshot.checkpoint_event_sequence is None
-        or candidate > (snapshot.checkpoint_label_available_at, snapshot.checkpoint_event_sequence)
-    ):
-        snapshot.checkpoint_label_available_at = label_available_at
-        snapshot.checkpoint_event_sequence = event_sequence
-    if snapshot.checkpoint_ready_sequence is None or ready_sequence > snapshot.checkpoint_ready_sequence:
-        snapshot.checkpoint_ready_sequence = ready_sequence
+
+def start_live_generation(*, session: Session, registration: ModelRegistration) -> int:
+    """Admit only observations committed after this generation's boundary.
+
+    The caller holds the registration row lock. Taking the ingestion lock also
+    prevents an in-flight collector from straddling the new event frontier.
+    """
+    event_store.lock_task_ingest(session=session, task_name=registration.task_name)
+    registration.start_sequence = (
+        int(
+            session.scalar(
+                select(func.coalesce(func.max(BenchmarkEvent.sequence), 0)).where(
+                    BenchmarkEvent.task_name == registration.task_name
+                )
+            )
+            or 0
+        )
+        + 1
+    )
+    registration.prediction_cursor_sequence = registration.start_sequence - 1
+    registration.label_cursor_sequence = int(
+        session.scalar(
+            select(func.coalesce(func.max(ReadyLabel.sequence), 0)).where(
+                ReadyLabel.task_name == registration.task_name
+            )
+        )
+        or 0
+    )
+    registration.failure_count = 0
+    registration.disabled_until = None
+    return registration.label_cursor_sequence
 
 
 def record_disabled_work(
-    session: Session, task_name: str, registration: ModelRegistration, limit: int
+    *, session: Session, task_name: str, registration: ModelRegistration, limit: int
 ) -> tuple[int, int]:
     """Terminally skip bounded work for a paused model and count it durably."""
     events = event_store.events_after_cursor(
-        session,
-        task_name,
-        registration.model_id,
-        registration.prediction_cursor_sequence,
-        registration.start_sequence,
-        limit,
+        session=session,
+        task_name=task_name,
+        model_id=registration.model_id,
+        cursor_sequence=registration.prediction_cursor_sequence,
+        start_sequence=registration.start_sequence,
+        limit=limit,
     )
-    missing = [event_id for event_id, _, _, has_state in events if not has_state]
+    missing = [row.event_id for row in events if not row.has_state]
     skipped_predictions = len(
-        event_store.add_prediction_skips(session, task_name, registration.model_id, missing, "model-disabled")
+        event_store.add_prediction_skips(
+            session=session,
+            task_name=task_name,
+            model_id=registration.model_id,
+            event_ids=missing,
+            reason="model-disabled",
+        )
     )
     if events:
-        registration.prediction_cursor_sequence = events[-1][1]
+        registration.prediction_cursor_sequence = events[-1].sequence
     labels = event_store.ready_labels_after_cursor(
-        session,
-        task_name,
-        registration.model_id,
-        registration.label_cursor_sequence,
-        registration.start_sequence,
-        limit,
+        session=session,
+        task_name=task_name,
+        model_id=registration.model_id,
+        cursor_sequence=registration.label_cursor_sequence,
+        start_sequence=registration.start_sequence,
+        limit=limit,
     )
-    missing_label_state = [event_id for _, event_id, *_, prediction_status, _, _ in labels if prediction_status is None]
-    event_store.add_prediction_skips(session, task_name, registration.model_id, missing_label_state, "model-disabled")
-    evaluations = [row for row in labels if row[6] == "predicted" and not row[7]]
-    event_store.add_metric_updates(session, task_name, registration.model_id, [row[1] for row in evaluations])
-    untrained = [row for row in labels if not row[8]]
+    missing_label_state = [row.event_id for row in labels if row.prediction_status is None]
+    event_store.add_prediction_skips(
+        session=session,
+        task_name=task_name,
+        model_id=registration.model_id,
+        event_ids=missing_label_state,
+        reason="model-disabled",
+    )
+    evaluations = [row for row in labels if row.prediction_status == "predicted" and not row.evaluated]
+    event_store.add_metric_updates(
+        session=session,
+        task_name=task_name,
+        model_id=registration.model_id,
+        event_ids=[row.event_id for row in evaluations],
+    )
+    untrained = [row for row in labels if not row.trained]
     trained_event_ids = event_store.add_trainings(
-        session, task_name, registration.model_id, [row[1] for row in untrained]
+        session=session,
+        task_name=task_name,
+        model_id=registration.model_id,
+        event_ids=[row.event_id for row in untrained],
+        skipped=True,
     )
     skipped_labels = len(trained_event_ids)
     if labels:
         last = labels[-1]
-        registration.label_cursor_sequence = last[0]
-        advance_model_checkpoint(session, task_name, registration, last[3], last[4], last[0])
+        advance_model_checkpoint(
+            session=session,
+            task_name=task_name,
+            registration=registration,
+            previous_sequence=registration.label_cursor_sequence,
+            ready_sequence=last.sequence,
+        )
+        registration.label_cursor_sequence = last.sequence
     registration.skipped_predictions += skipped_predictions
     registration.skipped_labels += skipped_labels
     return skipped_predictions, skipped_labels
 
 
-def model_registration(session: Session, task_name: str, model_id: str) -> ModelRegistration | None:
+def model_registration(*, session: Session, task_name: str, model_id: str) -> ModelRegistration | None:
     return session.get(ModelRegistration, {"task_name": task_name, "model_id": model_id})
 
 
-def store_artifact(session: Session, payload: bytes, signature: str, metadata: dict[str, Any]) -> ModelArtifact:
-    checksum = artifacts.sha256(payload)
+def store_artifact(*, session: Session, payload: bytes, signature: str, metadata: dict[str, Any]) -> ModelArtifact:
+    checksum = artifacts.sha256(payload=payload)
     artifact = session.scalar(select(ModelArtifact).where(ModelArtifact.sha256 == checksum))
     if artifact:
         # An identical artifact may be re-uploaded with a previously missing
@@ -348,7 +388,7 @@ def store_artifact(session: Session, payload: bytes, signature: str, metadata: d
 
 
 def record_artifact_validation(
-    artifact_record: ModelArtifact, task_name: str, definition: dict[str, Any], examples: int
+    *, artifact_record: ModelArtifact, task_name: str, definition: dict[str, Any], examples: int
 ) -> None:
     metadata = dict(artifact_record.metadata_ or {})
     validations = dict(metadata.get("validations") or {})
@@ -357,65 +397,43 @@ def record_artifact_validation(
     artifact_record.metadata_ = metadata
 
 
-def artifact(session: Session, artifact_id: str) -> ModelArtifact | None:
+def artifact(*, session: Session, artifact_id: str) -> ModelArtifact | None:
     return session.get(ModelArtifact, artifact_id)
 
 
-def latest_snapshot(session: Session, task_name: str, model_id: str) -> ModelSnapshot | None:
+def latest_snapshot(*, session: Session, task_name: str, model_id: str) -> ModelSnapshot | None:
     return session.scalar(
         select(ModelSnapshot).where(ModelSnapshot.task_name == task_name, ModelSnapshot.model_id == model_id)
     )
 
 
 def trained_examples_since_checkpoint(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    checkpoint_label_available_at: datetime | None,
-    checkpoint_event_sequence: int | None,
-    checkpoint_ready_sequence: int | None,
-) -> list[tuple[str, dict[str, Any], Any]]:
-    """Return committed learning updates not represented by a checkpoint."""
-    parameters: dict[str, Any] = {"task_name": task_name, "model_id": model_id}
-    watermark = ""
-    order_by = "label.available_at, event.sequence"
-    if checkpoint_ready_sequence is not None:
-        watermark = "AND ready.sequence > :checkpoint_ready_sequence"
-        parameters["checkpoint_ready_sequence"] = checkpoint_ready_sequence
-        order_by = "ready.sequence"
-    elif checkpoint_label_available_at is not None and checkpoint_event_sequence is not None:
-        watermark = """AND (label.available_at > :checkpoint_label_available_at
-                          OR (label.available_at = :checkpoint_label_available_at
-                              AND event.sequence > :checkpoint_event_sequence))"""
-        parameters.update(
-            checkpoint_label_available_at=checkpoint_label_available_at,
-            checkpoint_event_sequence=checkpoint_event_sequence,
-        )
+    *, session: Session, task_name: str, model_id: str, checkpoint_ready_sequence: int
+) -> Iterator[LabelledExample]:
+    """Stream committed learning not yet included in the saved model state."""
     rows = session.execute(
         text(
-            f"""SELECT event.event_id, event.event, label.y
-                 FROM benchmark_model_events AS model_event
-                 JOIN benchmark_events AS event USING (task_name, event_id)
-                 JOIN benchmark_labels AS label USING (task_name, event_id)
-                 JOIN benchmark_ready_labels AS ready USING (task_name, event_id)
-                 WHERE model_event.task_name = :task_name AND model_event.model_id = :model_id
-                   AND model_event.trained_at IS NOT NULL
-                   {watermark}
-                 ORDER BY {order_by}"""
+            """SELECT event.event_id, event.event, label.y
+           FROM benchmark_model_events AS state
+           JOIN benchmark_events AS event USING (task_name, event_id)
+           JOIN benchmark_labels AS label USING (task_name, event_id)
+           JOIN benchmark_ready_labels AS ready USING (task_name, event_id)
+           JOIN benchmark_models AS model USING (task_name, model_id)
+           WHERE state.task_name = :task AND state.model_id = :model
+             AND state.trained_at IS NOT NULL AND label.y <> 'null'::jsonb
+             AND NOT state.training_skipped
+             AND event.sequence >= model.start_sequence AND ready.sequence > :checkpoint
+           ORDER BY ready.sequence"""
         ),
-        parameters,
+        {"task": task_name, "model": model_id, "checkpoint": checkpoint_ready_sequence},
+        execution_options={"yield_per": 500},
     )
-    return [(event_id, event, y) for event_id, event, y in rows]
+    for event_id, payload, target in rows:
+        yield LabelledExample(event_id=event_id, payload=payload, target=target)
 
 
 def save_pickle_snapshot(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    payload: bytes,
-    checkpoint_label_available_at: datetime | None,
-    checkpoint_event_sequence: int | None,
-    checkpoint_ready_sequence: int | None,
+    *, session: Session, task_name: str, model_id: str, payload: bytes, checkpoint_ready_sequence: int
 ) -> ModelArtifact:
     """Replace the operational checkpoint instead of retaining every batch.
 
@@ -432,7 +450,9 @@ def save_pickle_snapshot(
     # immediately after an auto bootstrap). Keep the champion's descriptive
     # metadata in that case; the snapshot role is already represented by the
     # model_snapshots row.
-    artifact_record = store_artifact(session, payload, artifacts.sign(payload), {})
+    artifact_record = store_artifact(
+        session=session, payload=payload, signature=artifacts.sign(payload=payload), metadata={}
+    )
     snapshot_metadata = dict(artifact_record.metadata_ or {})
     snapshot_metadata.setdefault("source", "worker-snapshot")
     artifact_record.metadata_ = snapshot_metadata
@@ -442,16 +462,12 @@ def save_pickle_snapshot(
             task_name=task_name,
             model_id=model_id,
             artifact_id=artifact_record.artifact_id,
-            checkpoint_label_available_at=checkpoint_label_available_at,
-            checkpoint_event_sequence=checkpoint_event_sequence,
             checkpoint_ready_sequence=checkpoint_ready_sequence,
         )
         .on_conflict_do_update(
             index_elements=["task_name", "model_id"],
             set_={
                 "artifact_id": artifact_record.artifact_id,
-                "checkpoint_label_available_at": checkpoint_label_available_at,
-                "checkpoint_event_sequence": checkpoint_event_sequence,
                 "checkpoint_ready_sequence": checkpoint_ready_sequence,
                 "created_at": func.now(),
             },
@@ -459,11 +475,11 @@ def save_pickle_snapshot(
     )
     session.execute(statement)
     stale_ids = {previous_artifact_id} - {artifact_record.artifact_id} if previous_artifact_id else set()
-    _delete_unreferenced_artifacts(session, stale_ids)
+    _delete_unreferenced_artifacts(session=session, artifact_ids=stale_ids)
     return artifact_record
 
 
-def active_model_count(session: Session, task_name: str) -> int:
+def active_model_count(*, session: Session, task_name: str) -> int:
     return int(
         session.scalar(
             select(func.count())

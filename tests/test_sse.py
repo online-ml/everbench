@@ -8,7 +8,7 @@ import pytest
 from everbench.sse import subscribe
 
 
-def test_event_ids_are_carried_forward_between_sse_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_event_ids_are_carried_forward_between_sse_messages(*, monkeypatch: pytest.MonkeyPatch) -> None:
     body = b'id: 41\ndata: {"one": 1}\n\ndata: {"two": 2}\n\n'
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -18,17 +18,17 @@ def test_event_ids_are_carried_forward_between_sse_messages(monkeypatch: pytest.
     stop = threading.Event()
     monkeypatch.setattr("everbench.sse.httpx.Client", lambda **kwargs: client)
 
-    stream = subscribe("test", "https://example.test/stream", stop)
+    stream = subscribe(name="test", url="https://example.test/stream", stop=stop)
 
     assert next(stream).event_id == "41"
     assert next(stream).event_id == "41"
     stop.set()
 
 
-def test_reconnect_request_uses_the_durable_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconnect_request_uses_the_durable_cursor(*, monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[httpx.Request] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(*, request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(
             200,
@@ -36,11 +36,11 @@ def test_reconnect_request_uses_the_durable_cursor(monkeypatch: pytest.MonkeyPat
             content=b"id: 42\ndata: {}\n\n",
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(respond))
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: respond(request=request)))
     stop = threading.Event()
     monkeypatch.setattr("everbench.sse.httpx.Client", lambda **kwargs: client)
 
-    stream = subscribe("test", "https://example.test/stream", stop, last_event_id=lambda: "41")
+    stream = subscribe(name="test", url="https://example.test/stream", stop=stop, last_event_id=lambda: "41")
 
     assert next(stream).event_id == "42"
     stop.set()

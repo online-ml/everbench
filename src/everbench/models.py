@@ -2,39 +2,45 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from everbench import artifacts
 from everbench.metrics import MetricTracker
+from everbench.records import LabelledExample
 from everbench.tasks import TaskDefinition
 
 
-def prediction_for(task: TaskDefinition, model: PickledModel, event_id: str, event: dict[str, Any]) -> Any:
+def prediction_for(*, task: TaskDefinition, model: PickledModel, event_id: str, event: dict[str, Any]) -> Any:
     """Apply a task's prediction semantics to a model."""
     if task.PROBLEM_TYPE in {"binary_classification", "multiclass_classification"}:
         if model.supports_probabilities:
-            probabilities = model.predict_proba_one(event_id, event)
+            probabilities = model.predict_proba_one(event_id=event_id, event=event)
             if task.PROBLEM_TYPE == "multiclass_classification":
                 return probabilities
             return probabilities.get(True, probabilities.get(1, probabilities.get("true", 0.0)))
-        return model.predict_one(event_id, event)
+        return model.predict_one(event_id=event_id, event=event)
     if task.PROBLEM_TYPE == "anomaly_detection":
         if model.supports_scoring:
-            return model.score_one(event_id, event)
-        return model.predict_one(event_id, event)
-    return model.predict_one(event_id, event)
+            return model.score_one(event_id=event_id, event=event)
+        return model.predict_one(event_id=event_id, event=event)
+    return model.predict_one(event_id=event_id, event=event)
 
 
-def metric_inputs_for(task: TaskDefinition, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
+def metric_inputs_for(*, task: TaskDefinition, metric: Any, y_true: Any, prediction: Any) -> tuple[Any, Any]:
     """Let a task adapt a stored prediction to a metric's expected input."""
     hook = task.metric_inputs_for
-    return hook(metric, y_true, prediction) if hook is not None else (y_true, prediction)
+    if hook is not None:
+        return hook(metric=metric, y_true=y_true, prediction=prediction)
+    if task.PROBLEM_TYPE == "binary_classification":
+        return bool(y_true), prediction >= 0.5 if metric.requires_labels else prediction
+    return y_true, prediction
 
 
 class PickledModel:
     """Adapter for trusted online or scoring-only predictor pickles."""
 
-    def __init__(self, model_id: str, model: Any):
+    def __init__(self, *, model_id: str, model: Any):
         self._predict_one = getattr(model, "predict_one", None)
         self._predict_proba_one = getattr(model, "predict_proba_one", None)
         self._score_one = getattr(model, "score_one", None)
@@ -57,44 +63,44 @@ class PickledModel:
     def supports_scoring(self) -> bool:
         return callable(self._score_one)
 
-    def predict_one(self, event_id: str, event: dict[str, Any]) -> Any:
+    def predict_one(self, *, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._predict_one):
             raise AttributeError("underlying model does not provide predict_one")
-        return self._predict_one(event_id, event)
+        return self._predict_one(event_id=event_id, event=event)
 
-    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> Any:
+    def predict_proba_one(self, *, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._predict_proba_one):
             raise AttributeError("underlying model does not provide predict_proba_one")
-        return self._predict_proba_one(event_id, event)
+        return self._predict_proba_one(event_id=event_id, event=event)
 
-    def score_one(self, event_id: str, event: dict[str, Any]) -> Any:
+    def score_one(self, *, event_id: str, event: dict[str, Any]) -> Any:
         if not callable(self._score_one):
             raise AttributeError("underlying model does not provide score_one")
-        return self._score_one(event_id, event)
+        return self._score_one(event_id=event_id, event=event)
 
-    def learn_one(self, event_id: str, event: dict[str, Any], label: Any) -> None:
+    def learn_one(self, *, event_id: str, event: dict[str, Any], label: Any) -> None:
         learner = getattr(self.model, "learn_one", None)
         if learner is None:
             raise AttributeError("underlying model does not provide learn_one")
-        learner(event_id, event, label)
+        learner(event_id=event_id, event=event, label=label)
 
     def payload(self) -> bytes:
-        return artifacts.dumps(self.model)
+        return artifacts.dumps(model=self.model)
 
 
-def validate_model(
-    task: TaskDefinition,
-    candidate: PickledModel,
-    examples: list[tuple[str, dict[str, Any], object]],
-) -> int:
+def validate_model(*, task: TaskDefinition, candidate: PickledModel, examples: list[LabelledExample]) -> int:
     """Check a model protocol against recent examples."""
     if not examples:
         return 0
-    tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
-    for event_id, event, y in examples[-5:]:
-        prediction = prediction_for(task, candidate, event_id, event)
-        tracker.update(y, prediction, lambda metric, target, value: metric_inputs_for(task, metric, target, value))
+    tracker = MetricTracker.fresh(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS)
+    for example in examples[-5:]:
+        prediction = prediction_for(task=task, model=candidate, event_id=example.event_id, event=example.payload)
+        tracker.update(
+            y_true=example.target,
+            prediction=prediction,
+            inputs_for=partial(metric_inputs_for, task=task),
+        )
         if candidate.supports_learning:
-            candidate.learn_one(event_id, event, y)
+            candidate.learn_one(event_id=example.event_id, event=example.payload, label=example.target)
     tracker.values()
     return min(len(examples), 5)

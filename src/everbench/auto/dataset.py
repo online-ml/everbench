@@ -3,51 +3,49 @@
 from __future__ import annotations
 
 import itertools
-import json
 import tempfile
 from collections.abc import Iterator, Sequence
-from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, overload
 
-import pyarrow.parquet as pq
-
-from everbench.auto.evaluation import ArchiveExample
+from everbench.replay import ArchiveExample, read_examples
 from everbench.schema import ArchiveManifest
 
 
 class ArchiveWeek(Sequence[ArchiveExample]):
     """One archive file staged locally so every candidate can replay it."""
 
-    def __init__(self, path: Path, row_count: int, directory: tempfile.TemporaryDirectory[str] | None = None) -> None:
+    def __init__(
+        self, *, path: Path, row_count: int, directory: tempfile.TemporaryDirectory[str] | None = None
+    ) -> None:
         self.path = path
         self.row_count = row_count
         self._directory = directory
 
     @classmethod
-    def open(cls, manifest: ArchiveManifest) -> Self:
+    def open(cls, *, manifest: ArchiveManifest) -> Self:
         from everbench.archive import read_archive
 
         directory = tempfile.TemporaryDirectory(prefix="everbench-archive-week-")
         path = Path(directory.name) / "week.parquet"
         try:
-            path.write_bytes(read_archive(manifest.path))
+            path.write_bytes(read_archive(location=manifest.path))
         except BaseException:
             directory.cleanup()
             raise
-        return cls(path, manifest.row_count, directory)
+        return cls(path=path, row_count=manifest.row_count, directory=directory)
 
     def __len__(self) -> int:
         return self.row_count
 
     @overload
-    def __getitem__(self, index: int) -> ArchiveExample: ...
+    def __getitem__(self, index: int) -> ArchiveExample: ...  # noqa: PLR0917 -- external positional protocol
 
     @overload
-    def __getitem__(self, index: slice) -> tuple[ArchiveExample, ...]: ...
+    def __getitem__(self, index: slice) -> tuple[ArchiveExample, ...]: ...  # noqa: PLR0917 -- external positional protocol
 
-    def __getitem__(self, index: int | slice) -> ArchiveExample | tuple[ArchiveExample, ...]:
+    def __getitem__(self, index: int | slice) -> ArchiveExample | tuple[ArchiveExample, ...]:  # noqa: PLR0917 -- external positional protocol
         if isinstance(index, slice):
             return tuple(itertools.islice(self, *index.indices(len(self))))
         position = index + len(self) if index < 0 else index
@@ -56,30 +54,10 @@ class ArchiveWeek(Sequence[ArchiveExample]):
         return next(itertools.islice(self, position, position + 1))
 
     def __iter__(self) -> Iterator[ArchiveExample]:
-        parquet = pq.ParquetFile(self.path)
-        columns = [
-            "event_id",
-            "event_sequence",
-            "payload_json",
-            "label",
-            "event_available_at",
-            "label_available_at",
-        ]
-        for batch in parquet.iter_batches(columns=columns):
-            for row in batch.to_pylist():
-                available_at = datetime.fromisoformat(row["event_available_at"])
-                label_available_at = max(datetime.fromisoformat(row["label_available_at"]), available_at)
-                sequence = int(row["event_sequence"])
-                event = json.loads(row["payload_json"])
-                if not isinstance(event, dict):
-                    raise TypeError(f"archived event {row['event_id']!r} is not a mapping")
-                yield row["event_id"], sequence, event, row["label"], available_at, label_available_at
-
-    def positive_count(self) -> int:
-        return sum(int(bool(row[3])) for row in self)
+        yield from read_examples(path=self.path)
 
     def sequence_bounds(self) -> tuple[int, int]:
-        sequences = (row[1] for row in self)
+        sequences = (row.sequence for row in self)
         try:
             first = next(sequences)
         except StopIteration as error:
@@ -101,7 +79,7 @@ class ArchiveWeek(Sequence[ArchiveExample]):
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(
+    def __exit__(  # noqa: PLR0917 -- external positional protocol
         self,
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from river import base, metrics
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ConstraintResult:
     """The evaluator's result for one owner-defined promotion constraint."""
 
@@ -17,7 +17,7 @@ class ConstraintResult:
     detail: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Evaluation:
     """Evidence comparing fresh candidate and champion instances."""
 
@@ -27,7 +27,7 @@ class Evaluation:
     constraints: tuple[ConstraintResult, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MetricConstraint:
     """Require a candidate not to regress too far on a secondary metric."""
 
@@ -42,9 +42,9 @@ class MetricConstraint:
             raise ValueError("max_regression must be non-negative")
 
     def copy(self) -> MetricConstraint:
-        return MetricConstraint(self.name, self.metric.clone(), self.max_regression)
+        return MetricConstraint(name=self.name, metric=self.metric.clone(), max_regression=self.max_regression)
 
-    def evaluate(self, champion_score: float, candidate_score: float) -> ConstraintResult:
+    def evaluate(self, *, champion_score: float, candidate_score: float) -> ConstraintResult:
         if self.metric.bigger_is_better:
             regression = champion_score - candidate_score
         else:
@@ -61,7 +61,7 @@ class MetricConstraint:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Objective:
     """Agent-immutable promotion criteria supplied by the model owner."""
 
@@ -97,7 +97,7 @@ class Objective:
     def fresh_metric(self) -> metrics.base.ClassificationMetric:
         return self.metric.clone()
 
-    def accepts(self, evaluation: Evaluation) -> bool:
+    def accepts(self, *, evaluation: Evaluation) -> bool:
         """Apply the immutable score threshold and required constraints."""
         if evaluation.observations < self.min_observations:
             return False
@@ -118,7 +118,7 @@ class Objective:
         return all(results.get(name, False) for name in names_to_require)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Candidate:
     """A frozen proposal produced against one champion generation."""
 

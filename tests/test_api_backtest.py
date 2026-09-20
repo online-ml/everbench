@@ -14,18 +14,18 @@ from everbench.api import create_app, format_duration
 
 
 class ConstantModel:
-    def predict_one(self, event_id: str, event: dict[str, Any]) -> float:
+    def predict_one(self, *, event_id: str, event: dict[str, Any]) -> float:
         del event_id, event
         return 0.5
 
 
 @pytest.fixture
-def credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def credentials(*, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EVERBENCH_API_KEY", "test-api-key")
     monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "test-signing-key")
 
 
-def post_backtest(client, payload: bytes, signature: str, archive_sha256: str):
+def post_backtest(*, client, payload: bytes, signature: str, archive_sha256: str):
     return client.post(
         "/api/tasks/dummy/backtest",
         data={"model": (io.BytesIO(payload), "model.pkl"), "archive_sha256": archive_sha256},
@@ -43,10 +43,10 @@ def test_duration_format_is_compact() -> None:
 
 
 def test_backtest_uses_the_posted_model_without_a_registration(
-    credentials: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    *, credentials: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    payload = artifacts.dumps(ConstantModel())
-    signature = artifacts.sign(payload)
+    payload = artifacts.dumps(model=ConstantModel())
+    signature = artifacts.sign(payload=payload)
     path = tmp_path / "events.parquet"
     pq.write_table(
         pa.Table.from_pylist(
@@ -65,10 +65,10 @@ def test_backtest_uses_the_posted_model_without_a_registration(
     )
     manifest = SimpleNamespace(path=str(path), content_sha256="archive", row_count=1, byte_size=path.stat().st_size)
     monkeypatch.setattr("everbench.api._session", lambda: SimpleNamespace())
-    monkeypatch.setattr(archive_store, "task_archive", lambda *args: manifest)
+    monkeypatch.setattr(archive_store, "task_archive", lambda *args, **kwargs: manifest)
 
     with create_app().test_client() as client:
-        response = post_backtest(client, payload, signature, "archive")
+        response = post_backtest(client=client, payload=payload, signature=signature, archive_sha256="archive")
 
     assert response.status_code == 200
     body = response.get_json()
@@ -79,10 +79,10 @@ def test_backtest_uses_the_posted_model_without_a_registration(
 
 
 def test_missing_archive_remains_a_not_found_response(
-    credentials: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    *, credentials: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    payload = artifacts.dumps(ConstantModel())
-    signature = artifacts.sign(payload)
+    payload = artifacts.dumps(model=ConstantModel())
+    signature = artifacts.sign(payload=payload)
     manifest = SimpleNamespace(
         path=str(tmp_path / "missing.parquet"),
         content_sha256="missing",
@@ -90,9 +90,9 @@ def test_missing_archive_remains_a_not_found_response(
         byte_size=1,
     )
     monkeypatch.setattr("everbench.api._session", lambda: SimpleNamespace())
-    monkeypatch.setattr(archive_store, "task_archive", lambda *args: manifest)
+    monkeypatch.setattr(archive_store, "task_archive", lambda *args, **kwargs: manifest)
 
     with create_app().test_client() as client:
-        response = post_backtest(client, payload, signature, "missing")
+        response = post_backtest(client=client, payload=payload, signature=signature, archive_sha256="missing")
 
     assert response.status_code == 404

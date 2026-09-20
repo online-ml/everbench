@@ -95,24 +95,28 @@ class ReadyLabel(Base):
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False, unique=True)
+    has_target: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
 
-class NegativeLabelSchedule(Base):
-    """Events awaiting their task's negative-label horizon."""
+class LabelSchedule(Base):
+    """Pending resolutions, indexed by deadline and optional forecast entity."""
 
-    __tablename__ = "benchmark_negative_label_schedule"
+    __tablename__ = "benchmark_label_schedule"
     __table_args__ = (
         ForeignKeyConstraint(
             ["task_name", "event_id"],
             ["benchmark_events.task_name", "benchmark_events.event_id"],
             ondelete="CASCADE",
         ),
-        Index("benchmark_negative_label_schedule_due_idx", "task_name", "due_at"),
+        Index("benchmark_label_schedule_due_idx", "task_name", "due_at"),
+        Index("benchmark_label_schedule_entity_idx", "task_name", "entity_key", "target_at"),
     )
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    target_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entity_key: Mapped[str | None] = mapped_column(String)
 
 
 class ModelEventState(Base):
@@ -148,6 +152,7 @@ class ModelEventState(Base):
     predicted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    training_skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
 class MetricState(Base):
@@ -226,9 +231,7 @@ class ModelSnapshot(Base):
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
-    checkpoint_label_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    checkpoint_event_sequence: Mapped[int | None] = mapped_column(BigInteger)
-    checkpoint_ready_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    checkpoint_ready_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -287,6 +290,7 @@ class ArchiveManifest(Base):
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    label_count: Mapped[int | None] = mapped_column(Integer)
     byte_size: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

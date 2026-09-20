@@ -36,10 +36,11 @@ from everbench.config import CONFIG, RuntimeConfig
 from everbench.db import make_session_factory
 from everbench.metrics import metric_definition
 from everbench.models import PickledModel, validate_model
+from everbench.records import LabelledExample
 from everbench.tasks import TaskDefinition, load_task_named
 
 
-def format_duration(seconds: float) -> str:
+def format_duration(seconds: float) -> str:  # noqa: PLR0917 -- external positional protocol
     """Format a short, stable human duration for operational UI messages."""
     seconds = max(0, round(seconds))
     for unit, unit_seconds in (("d", 86_400), ("h", 3_600), ("m", 60)):
@@ -48,15 +49,15 @@ def format_duration(seconds: float) -> str:
     return f"{seconds}s"
 
 
-def format_time_until(value: datetime) -> str:
+def format_time_until(value: datetime) -> str:  # noqa: PLR0917 -- external positional protocol
     return f"in {format_duration((value - datetime.now(UTC)).total_seconds())}"
 
 
-def format_time_since(value: datetime) -> str:
+def format_time_since(value: datetime) -> str:  # noqa: PLR0917 -- external positional protocol
     return f"{format_duration((datetime.now(UTC) - value).total_seconds())} ago"
 
 
-def archive_download_name(task_name: str, manifest: Any) -> str:
+def archive_download_name(*, task_name: str, manifest: Any) -> str:
     return f"{task_name}-{manifest.event_date.isoformat()}-{manifest.content_sha256[:12]}.parquet"
 
 
@@ -72,13 +73,13 @@ def _session() -> Session:
     return g.db_session
 
 
-def _close_session(_: BaseException | None = None) -> None:
+def _close_session(_: BaseException | None = None) -> None:  # noqa: PLR0917 -- external positional protocol
     session = g.pop("db_session", None)
     if session is not None:
         session.close()
 
 
-def require_api_key(view: Callable) -> Callable:
+def require_api_key(view: Callable) -> Callable:  # noqa: PLR0917 -- external positional protocol
     @wraps(view)
     def wrapped(*args, **kwargs):
         expected = os.getenv("EVERBENCH_API_KEY")
@@ -91,7 +92,7 @@ def require_api_key(view: Callable) -> Callable:
     return wrapped
 
 
-def registration_response(registration) -> dict[str, Any]:
+def registration_response(*, registration) -> dict[str, Any]:
     return {
         "task_name": registration.task_name,
         "model_id": registration.model_id,
@@ -103,14 +104,14 @@ def registration_response(registration) -> dict[str, Any]:
     }
 
 
-def archive_bytes(manifest) -> bytes:
+def archive_bytes(*, manifest) -> bytes:
     try:
-        return archive.read_archive(manifest.path)
+        return archive.read_archive(location=manifest.path)
     except (FileNotFoundError, OSError, ValueError):
         abort(404)
 
 
-def multipart_json(name: str, default: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def multipart_json(*, name: str, default: dict[str, Any] | None = None) -> dict[str, Any] | None:
     value = request.form.get(name)
     if value is None:
         return default
@@ -121,25 +122,27 @@ def multipart_json(name: str, default: dict[str, Any] | None = None) -> dict[str
     return parsed if isinstance(parsed, dict) else None
 
 
-def validation_examples(session: Session, task_name: str) -> list[tuple[str, dict[str, Any], Any]]:
+def validation_examples(*, session: Session, task_name: str) -> list[LabelledExample]:
     """Prefer fresh Postgres labels; archives make a durable fallback."""
-    examples = event_store.latest_labelled_examples(session, task_name, limit=5)
+    examples = event_store.latest_labelled_examples(session=session, task_name=task_name, limit=5)
     if len(examples) < 5:
         examples = (
-            archive.latest_labelled_examples(archive_store.task_archives(session, task_name), limit=5 - len(examples))
+            archive.latest_labelled_examples(
+                manifests=archive_store.task_archives(session=session, task_name=task_name), limit=5 - len(examples)
+            )
             + examples
         )
     return examples
 
 
-def task_or_404(task_name: str):
+def task_or_404(*, task_name: str):
     try:
-        return load_task_named(task_name)
+        return load_task_named(task_name=task_name)
     except LookupError:
         abort(404, description=f"task definition not found: {task_name}")
 
 
-def task_source_url(task) -> str:
+def task_source_url(*, task) -> str:
     """Link a checked-in task definition to its canonical GitHub source."""
     task_path = Path(task.__file__).resolve()
     tasks_root = next((parent for parent in task_path.parents if parent.name == "tasks"), None)
@@ -157,7 +160,7 @@ MEDALS = (
 
 
 def leaderboard_view(
-    rows: list[dict[str, Any]], configured_metrics: tuple[Any, ...], primary_metric: str | None = None
+    *, rows: list[dict[str, Any]], configured_metrics: tuple[Any, ...], primary_metric: str | None = None
 ) -> dict[str, Any]:
     """Add metric placements and apply the task's natural default ordering."""
     metrics = [
@@ -171,7 +174,7 @@ def leaderboard_view(
         metrics.sort(key=lambda metric: metric["name"] != primary_metric)
     cutoff = datetime.now(UTC) - timedelta(days=3)
 
-    def is_recent(row: dict[str, Any]) -> bool:
+    def is_recent(*, row: dict[str, Any]) -> bool:
         created_at = row.get("created_at")
         if not isinstance(created_at, datetime):
             return False
@@ -179,8 +182,8 @@ def leaderboard_view(
             created_at = created_at.replace(tzinfo=UTC)
         return created_at > cutoff
 
-    leaderboard = [{**row, "metric_medals": {}} for row in rows if not is_recent(row)]
-    recent_leaderboard = [{**row, "metric_medals": {}} for row in rows if is_recent(row)]
+    leaderboard = [{**row, "metric_medals": {}} for row in rows if not is_recent(row=row)]
+    recent_leaderboard = [{**row, "metric_medals": {}} for row in rows if is_recent(row=row)]
 
     for metric in metrics:
         scores = []
@@ -208,7 +211,7 @@ def leaderboard_view(
 
     first_metric = metrics[0]
 
-    def first_metric_sort_key(row: dict[str, Any]) -> tuple[bool, float]:
+    def first_metric_sort_key(row: dict[str, Any]) -> tuple[bool, float]:  # noqa: PLR0917 -- external positional protocol
         value = row["metrics"].get(first_metric["name"])
         try:
             score = float(value)
@@ -227,9 +230,11 @@ def leaderboard_view(
     }
 
 
-def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
+def task_snapshot(*, session: Session, task: TaskDefinition) -> dict[str, Any]:
     task_name = task.TASK_NAME
-    heartbeats = [heartbeat for heartbeat in reporting.worker_health(session) if heartbeat.task_name == task_name]
+    heartbeats = [
+        heartbeat for heartbeat in reporting.worker_health(session=session) if heartbeat.task_name == task_name
+    ]
     runtime = next((heartbeat for heartbeat in heartbeats if heartbeat.role == "task-runtime"), None)
     hot_store: dict[str, int] | None = None
     if runtime and runtime.detail:
@@ -240,30 +245,29 @@ def task_snapshot(session: Session, task: TaskDefinition) -> dict[str, Any]:
         except ValueError:
             hot_store = None
     leaderboard = leaderboard_view(
-        reporting.task_leaderboard(session, task_name), task.METRICS, task.LEADERBOARD_PRIMARY_METRIC
+        rows=reporting.task_leaderboard(session=session, task_name=task_name),
+        configured_metrics=task.METRICS,
+        primary_metric=task.LEADERBOARD_PRIMARY_METRIC,
     )
     return {
-        "stats": reporting.task_stats(session, task_name),
+        "stats": reporting.task_stats(session=session, task_name=task_name),
         **leaderboard,
         "hot_store": hot_store,
     }
 
 
-def create_app(
-    config: RuntimeConfig | None = None,
-    session_factory: sessionmaker[Session] | None = None,
-) -> Flask:
+def create_app(*, config: RuntimeConfig | None = None, session_factory: sessionmaker[Session] | None = None) -> Flask:
     runtime_config = config or CONFIG
     app = Flask(__name__)
     app.extensions["everbench_sessions"] = session_factory or sessions()
     app.teardown_appcontext(_close_session)
 
-    def format_number(value: int) -> str:
+    def format_number(value: int) -> str:  # noqa: PLR0917 -- external positional protocol
         return f"{int(value):,}"
 
-    def format_file_size(value: int | str | None) -> str:
+    def format_file_size(value: int | str | None) -> str:  # noqa: PLR0917 -- external positional protocol
         try:
-            size = float(value if isinstance(value, int) else archive.archive_size(value or ""))
+            size = float(value if isinstance(value, int) else archive.archive_size(location=value or ""))
         except OSError:
             return "unavailable"
         for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -280,53 +284,53 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
-        return render_template("tasks.html", tasks=reporting.task_names(_session()))
+        return render_template("tasks.html", tasks=reporting.task_names(session=_session()))
 
     @app.get("/api")
     def api_documentation() -> str:
         return render_template("api.html")
 
     @app.get("/tasks/<task_name>")
-    def task_dashboard(task_name: str) -> str:
-        task = task_or_404(task_name)
-        snapshot = task_snapshot(_session(), task)
+    def task_dashboard(*, task_name: str) -> str:
+        task = task_or_404(task_name=task_name)
+        snapshot = task_snapshot(session=_session(), task=task)
         return render_template(
             "task.html",
             task_name=task_name,
             task_type=task.PROBLEM_TYPE,
-            task_source_url=task_source_url(task),
+            task_source_url=task_source_url(task=task),
             task_description=task.DESCRIPTION_HTML,
-            archives=archive_store.task_archives(_session(), task_name),
+            archives=archive_store.task_archives(session=_session(), task_name=task_name),
             **snapshot,
         )
 
     @app.get("/tasks/<task_name>/panel")
-    def task_panel(task_name: str) -> Response:
+    def task_panel(*, task_name: str) -> Response:
         """HTML fragment polled by HTMX on the task dashboard."""
-        task = task_or_404(task_name)
+        task = task_or_404(task_name=task_name)
         response = make_response(
-            render_template("_task_panel.html", task_name=task_name, **task_snapshot(_session(), task))
+            render_template("_task_panel.html", task_name=task_name, **task_snapshot(session=_session(), task=task))
         )
         response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.get("/tasks/<task_name>/models/<model_id>/detail")
-    def model_detail(task_name: str, model_id: str) -> str:
-        detail = reporting.model_detail(_session(), task_name, model_id)
+    def model_detail(*, task_name: str, model_id: str) -> str:
+        detail = reporting.model_detail(session=_session(), task_name=task_name, model_id=model_id)
         if detail is None:
             abort(404)
         return render_template("_model_detail.html", model=detail)
 
     @app.get("/api/tasks/<task_name>/archives/<content_sha256>")
-    def download_archive(task_name: str, content_sha256: str) -> Response:
-        manifest = archive_store.task_archive(_session(), task_name, content_sha256)
+    def download_archive(*, task_name: str, content_sha256: str) -> Response:
+        manifest = archive_store.task_archive(session=_session(), task_name=task_name, content_sha256=content_sha256)
         if manifest is None:
             abort(404)
-        filename = archive_download_name(task_name, manifest)
+        filename = archive_download_name(task_name=task_name, manifest=manifest)
         if not manifest.path.startswith("s3://"):
             return send_file(manifest.path, as_attachment=True, download_name=filename)
         response = Response(
-            stream_with_context(archive.stream_archive(manifest.path)), mimetype="application/octet-stream"
+            stream_with_context(archive.stream_archive(location=manifest.path)), mimetype="application/octet-stream"
         )
         if manifest.byte_size is not None:
             response.content_length = manifest.byte_size
@@ -352,7 +356,7 @@ def create_app(
                     "last_seen_at": heartbeat.last_seen_at.isoformat(),
                     "stale": (now - heartbeat.last_seen_at).total_seconds() > runtime_config.heartbeat_seconds * 2,
                 }
-                for heartbeat in reporting.worker_health(_session())
+                for heartbeat in reporting.worker_health(session=_session())
             ]
         )
 
@@ -370,14 +374,14 @@ def create_app(
 
     @app.post("/api/tasks/<task_name>/models")
     @require_api_key
-    def upload_model(task_name: str) -> Response | tuple[Response, int]:
+    def upload_model(*, task_name: str) -> Response | tuple[Response, int]:
         """Validate and register one signed model artifact."""
-        task = task_or_404(task_name)
+        task = task_or_404(task_name=task_name)
         uploaded = request.files.get("model")
         model_id = request.form.get("model_id", "")
         owner = request.form.get("owner", "")
         class_definition = request.form.get("class_definition", "")
-        metadata = multipart_json("metadata", {})
+        metadata = multipart_json(name="metadata", default={})
         if uploaded is None:
             return jsonify(error="multipart form field 'model' is required"), 400
         if not model_id.strip() or not owner.strip():
@@ -395,16 +399,16 @@ def create_app(
         if not payload or len(payload) > runtime_config.max_model_bytes:
             return jsonify(error=f"model must be between 1 and {runtime_config.max_model_bytes} bytes"), 413
         try:
-            is_trusted = artifacts.verify(payload, signature)
+            is_trusted = artifacts.verify(payload=payload, signature=signature)
         except RuntimeError as error:
             return jsonify(error=str(error)), 503
         if not is_trusted:
             return jsonify(error="invalid model signature"), 400
         session = _session()
-        examples = validation_examples(session, task_name)
+        examples = validation_examples(session=session, task_name=task_name)
         try:
-            candidate = PickledModel("validation", artifacts.loads(payload, signature))
-            example_count = validate_model(task, candidate, examples)
+            candidate = PickledModel(model_id="validation", model=artifacts.loads(payload=payload, signature=signature))
+            example_count = validate_model(task=task, candidate=candidate, examples=examples)
             class_name = type(candidate.model).__name__
         except Exception as error:
             return jsonify(error=f"model validation failed: {error}"), 422
@@ -414,17 +418,25 @@ def create_app(
                 "class_definition": class_definition,
                 "class_name": class_name,
             }
-            artifact_record = model_store.store_artifact(session, payload, signature, metadata)
-            definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
-            model_store.record_artifact_validation(artifact_record, task_name, definition, example_count)
-            model_store.lock_model_registrations(session, task_name)
-            existing = model_store.model_registration(session, task_name, model_id.strip())
+            artifact_record = model_store.store_artifact(
+                session=session, payload=payload, signature=signature, metadata=metadata
+            )
+            definition = metric_definition(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS)
+            model_store.record_artifact_validation(
+                artifact_record=artifact_record, task_name=task_name, definition=definition, examples=example_count
+            )
+            model_store.lock_model_registrations(session=session, task_name=task_name)
+            existing = model_store.model_registration(session=session, task_name=task_name, model_id=model_id.strip())
             if (existing is None or not existing.active) and model_store.active_model_count(
-                session, task_name
+                session=session, task_name=task_name
             ) >= runtime_config.max_active_models_per_task:
                 raise ValueError(f"a task may have at most {runtime_config.max_active_models_per_task} active models")
             registration, created = model_store.register_model(
-                session, task_name, model_id.strip(), owner.strip(), artifact_record.artifact_id
+                session=session,
+                task_name=task_name,
+                model_id=model_id.strip(),
+                owner=owner.strip(),
+                artifact_id=artifact_record.artifact_id,
             )
             session.commit()
         except ValueError as error:
@@ -433,7 +445,7 @@ def create_app(
         except Exception:
             session.rollback()
             raise
-        response = registration_response(registration)
+        response = registration_response(registration=registration)
         response["created"] = created
         response["validation_examples"] = example_count
         response["sha256"] = artifact_record.sha256
@@ -441,18 +453,18 @@ def create_app(
 
     @app.delete("/api/tasks/<task_name>/models/<model_id>")
     @require_api_key
-    def remove_model(task_name: str, model_id: str) -> Response | tuple[Response, int]:
+    def remove_model(*, task_name: str, model_id: str) -> Response | tuple[Response, int]:
         session = _session()
-        if not model_store.delete_model(session, task_name, model_id):
+        if not model_store.delete_model(session=session, task_name=task_name, model_id=model_id):
             return jsonify(error="no model with that ID"), 404
         session.commit()
         return jsonify(task_name=task_name, model_id=model_id, deleted=True)
 
     @app.post("/api/tasks/<task_name>/backtest")
     @require_api_key
-    def backtest_model(task_name: str) -> Response | tuple[Response, int]:
+    def backtest_model(*, task_name: str) -> Response | tuple[Response, int]:
         """Run an uploaded signed model without registering or persisting it."""
-        task = task_or_404(task_name)
+        task = task_or_404(task_name=task_name)
         uploaded = request.files.get("model")
         archive_sha256 = request.form.get("archive_sha256")
         if uploaded is None:
@@ -464,18 +476,18 @@ def create_app(
         if not payload or len(payload) > runtime_config.max_model_bytes:
             return jsonify(error=f"model must be between 1 and {runtime_config.max_model_bytes} bytes"), 413
         try:
-            is_trusted = artifacts.verify(payload, signature)
+            is_trusted = artifacts.verify(payload=payload, signature=signature)
         except RuntimeError as error:
             return jsonify(error=str(error)), 503
         if not is_trusted:
             return jsonify(error="invalid model signature"), 400
         session = _session()
-        manifest = archive_store.task_archive(session, task_name, archive_sha256)
+        manifest = archive_store.task_archive(session=session, task_name=task_name, content_sha256=archive_sha256)
         if manifest is None:
             return jsonify(error="archive not found"), 404
         try:
             archive_bytes_count = (
-                manifest.byte_size if manifest.byte_size is not None else archive.archive_size(manifest.path)
+                manifest.byte_size if manifest.byte_size is not None else archive.archive_size(location=manifest.path)
             )
         except OSError:
             return jsonify(error="archive is unavailable"), 404
@@ -483,9 +495,11 @@ def create_app(
             return jsonify(error=f"archive exceeds the {runtime_config.max_backtest_rows:,}-row backtest limit"), 413
         if archive_bytes_count > runtime_config.max_backtest_bytes:
             return jsonify(error=f"archive exceeds the {runtime_config.max_backtest_bytes:,}-byte backtest limit"), 413
-        data = archive_bytes(manifest)
+        data = archive_bytes(manifest=manifest)
         try:
-            result = archive.replay_archive(task, artifacts.loads(payload, signature), data)
+            result = archive.replay_archive(
+                task=task, uploaded_model=artifacts.loads(payload=payload, signature=signature), path=data
+            )
         except Exception as error:
             return jsonify(error=f"backtest failed: {error}"), 422
         return jsonify(archive_sha256=manifest.content_sha256, **result)

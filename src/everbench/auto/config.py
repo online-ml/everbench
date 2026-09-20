@@ -9,7 +9,7 @@ from typing import Any
 from everbench.auto.research import Objective
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class AutoResearchConfig:
     """Immutable task policy consumed by Everbench's external research worker."""
 

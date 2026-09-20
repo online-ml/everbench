@@ -10,7 +10,7 @@ from everbench.schema import Base
 
 config = context.config
 if url := os.getenv("DATABASE_URL"):
-    config.set_main_option("sqlalchemy.url", sqlalchemy_url(url))
+    config.set_main_option("sqlalchemy.url", sqlalchemy_url(url=url))
 else:
     raise RuntimeError(
         "DATABASE_URL must be set before running Alembic, for example: postgresql://USER:PASSWORD@HOST:5432/everbench"

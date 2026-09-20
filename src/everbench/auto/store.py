@@ -13,6 +13,7 @@ from everbench.schema import AutoExperiment
 
 
 def begin_experiment(
+    *,
     session: Session,
     task_name: str,
     model_id: str,
@@ -40,8 +41,8 @@ def begin_experiment(
 
 
 def finish_experiment(
-    experiment: AutoExperiment,
     *,
+    experiment: AutoExperiment,
     status: str,
     hypothesis: str | None = None,
     proposal: dict[str, Any] | None = None,
@@ -62,7 +63,7 @@ def finish_experiment(
     experiment.completed_at = datetime.now(UTC)
 
 
-def recent_experiments(session: Session, task_name: str, model_id: str, limit: int = 20) -> list[AutoExperiment]:
+def recent_experiments(*, session: Session, task_name: str, model_id: str, limit: int = 20) -> list[AutoExperiment]:
     return list(
         session.scalars(
             select(AutoExperiment)
@@ -74,11 +75,7 @@ def recent_experiments(session: Session, task_name: str, model_id: str, limit: i
 
 
 def experiment_for_cohort(
-    session: Session,
-    task_name: str,
-    model_id: str,
-    comparison_start_sequence: int,
-    comparison_end_sequence: int,
+    *, session: Session, task_name: str, model_id: str, comparison_start_sequence: int, comparison_end_sequence: int
 ) -> AutoExperiment | None:
     """Return the experiment for an exact archive-week sequence range."""
     return session.scalar(
@@ -91,7 +88,7 @@ def experiment_for_cohort(
     )
 
 
-def latest_experiment(session: Session, task_name: str, model_id: str) -> AutoExperiment | None:
+def latest_experiment(*, session: Session, task_name: str, model_id: str) -> AutoExperiment | None:
     return session.scalar(
         select(AutoExperiment)
         .where(

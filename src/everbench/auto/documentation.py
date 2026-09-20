@@ -10,10 +10,7 @@ from everbench.schema import AutoExperiment
 
 
 def documented_source(
-    source: str,
-    metadata: dict[str, Any],
-    experiments: list[AutoExperiment],
-    counts: dict[str, int],
+    *, source: str, metadata: dict[str, Any], experiments: list[AutoExperiment], counts: dict[str, int]
 ) -> str:
     """Prepend a live module docstring without changing the executable artifact."""
     generation = metadata.get("generation", 0)
@@ -28,11 +25,11 @@ def documented_source(
         "Current champion:",
     ]
 
-    def note(value: str, indent: str = "  ") -> None:
+    def note(*, value: str, indent: str = "  ") -> None:
         lines.append(fill(value, width=88, initial_indent=indent, subsequent_indent=indent))
 
     hypothesis = metadata.get("hypothesis")
-    note(hypothesis or "Initial model, trained on a completed archive week; no promoted changes yet.")
+    note(value=hypothesis or "Initial model, trained on a completed archive week; no promoted changes yet.")
     if not experiments:
         lines.extend(["", "No research rounds have run yet."])
     else:
@@ -40,11 +37,11 @@ def documented_source(
         lines.extend(["", "Research status:"])
         if latest.status == "running":
             note(
-                f"{latest.researcher} is exploring candidates against generation {latest.parent_generation}. "
+                value=f"{latest.researcher} is exploring candidates against generation {latest.parent_generation}. "
                 "The selected hypothesis and weekly comparison will appear when the round finishes."
             )
         else:
-            note("No research round is currently running. The latest completed attempts are listed below.")
+            note(value="No research round is currently running. The latest completed attempts are listed below.")
         lines.extend(["", f"Recent rounds (latest {len(experiments)}, newest first):"])
         for row in experiments:
             timestamp = row.started_at.strftime("%Y-%m-%d %H:%M %Z")
@@ -53,23 +50,23 @@ def documented_source(
                 transition += f" → {row.parent_generation + 1}"
             lines.append(f"  {timestamp} — {row.status}, {transition}")
             if row.hypothesis:
-                note(row.hypothesis, "    ")
+                note(value=row.hypothesis, indent="    ")
             evaluation = row.evaluation or {}
             if evaluation:
                 note(
-                    f"{evaluation['metric']}: champion {evaluation['champion_score']:.6f}, "
+                    value=f"{evaluation['metric']}: champion {evaluation['champion_score']:.6f}, "
                     f"candidate {evaluation['candidate_score']:.6f}; "
                     f"improvement {evaluation['improvement']:+.6f} "
                     f"on {evaluation['observations']:,} archived observations.",
-                    "    ",
+                    indent="    ",
                 )
                 failed = [item for item in evaluation.get("constraints", []) if not item["passed"]]
                 for item in failed:
-                    note(f"Failed constraint {item['name']}: {item['detail']}", "    ")
+                    note(value=f"Failed constraint {item['name']}: {item['detail']}", indent="    ")
                 if row.status == "rejected" and not failed:
-                    note("Did not meet the promotion thresholds for improvement and evidence.", "    ")
+                    note(value="Did not meet the promotion thresholds for improvement and evidence.", indent="    ")
             if row.error:
-                note(f"Error: {row.error}", "    ")
+                note(value=f"Error: {row.error}", indent="    ")
         lines.extend(
             [
                 "",

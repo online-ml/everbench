@@ -54,7 +54,7 @@ BLOCKED_CALLS = {
 }
 
 
-def validate_candidate_source(source: str, max_bytes: int) -> None:
+def validate_candidate_source(*, source: str, max_bytes: int) -> None:
     """Reject system access while leaving model construction open-ended."""
     if len(source.encode()) > max_bytes:
         raise ValueError(f"candidate source exceeds the {max_bytes:,}-byte limit")
@@ -86,7 +86,7 @@ def validate_candidate_source(source: str, max_bytes: int) -> None:
         raise ValueError("candidate source must define exactly one synchronous build_model()")
 
 
-def _run_runtime(payload: dict[str, Any], timeout_seconds: float, max_output_bytes: int) -> Any:
+def _run_runtime(*, payload: dict[str, Any], timeout_seconds: float, max_output_bytes: int) -> Any:
     with tempfile.TemporaryDirectory(prefix="everbench-auto-") as directory:
         root = Path(directory)
         request_path = root / "request.pkl"
@@ -136,15 +136,13 @@ def _run_runtime(payload: dict[str, Any], timeout_seconds: float, max_output_byt
         return result.get("value")
 
 
-def build_candidate_model(
-    source: str,
-    *,
-    timeout_seconds: float,
-    max_source_bytes: int,
-    max_output_bytes: int,
-) -> Any:
-    validate_candidate_source(source, max_source_bytes)
-    model = _run_runtime({"operation": "build", "source": source}, timeout_seconds, max_output_bytes)
+def build_candidate_model(*, source: str, timeout_seconds: float, max_source_bytes: int, max_output_bytes: int) -> Any:
+    validate_candidate_source(source=source, max_bytes=max_source_bytes)
+    model = _run_runtime(
+        payload={"operation": "build", "source": source},
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
+    )
     if not callable(getattr(model, "learn_one", None)) or not (
         callable(getattr(model, "predict_one", None)) or callable(getattr(model, "predict_proba_one", None))
     ):
@@ -153,19 +151,19 @@ def build_candidate_model(
 
 
 def evaluate_candidate_source(
+    *,
     source: str,
     champion: base.Classifier,
     observations: Sequence[ArchiveExample],
     objective: Objective,
-    *,
     max_prediction_time_ratio: float,
     timeout_seconds: float,
     max_source_bytes: int,
     max_output_bytes: int,
 ) -> EvaluationOutcome:
-    validate_candidate_source(source, max_source_bytes)
+    validate_candidate_source(source=source, max_bytes=max_source_bytes)
     outcome = _run_runtime(
-        {
+        payload={
             "operation": "evaluate",
             "source": source,
             "champion": champion,
@@ -173,8 +171,8 @@ def evaluate_candidate_source(
             "objective": objective,
             "max_prediction_time_ratio": max_prediction_time_ratio,
         },
-        timeout_seconds,
-        max_output_bytes,
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
     )
     if not isinstance(outcome, EvaluationOutcome):
         raise TypeError("candidate evaluator returned an invalid outcome")

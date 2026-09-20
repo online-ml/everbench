@@ -29,12 +29,7 @@ class AutoClassifier(base.Classifier):
         to the research agent. It is copied at initialization and snapshot time.
     """
 
-    def __init__(
-        self,
-        model: base.Classifier,
-        objective: Objective,
-        context: Any = None,
-    ) -> None:
+    def __init__(self, *, model: base.Classifier, objective: Objective, context: Any = None) -> None:
         if not objective.metric.works_with(model):
             raise ValueError(f"{type(objective.metric).__name__} does not work with {type(model).__name__}")
         incompatible = [
@@ -72,19 +67,19 @@ class AutoClassifier(base.Classifier):
     def _multiclass(self) -> bool:
         return self.model._multiclass
 
-    def predict_one(self, x: dict[Any, Any], **kwargs: Any) -> Any:
+    def predict_one(self, x: dict[Any, Any], **kwargs: Any) -> Any:  # noqa: PLR0917 -- external positional protocol
         return self.model.predict_one(x, **kwargs)
 
-    def predict_proba_one(self, x: dict[Any, Any], **kwargs: Any) -> dict[Any, float]:
+    def predict_proba_one(self, x: dict[Any, Any], **kwargs: Any) -> dict[Any, float]:  # noqa: PLR0917 -- external positional protocol
         return self.model.predict_proba_one(x, **kwargs)
 
-    def _prediction_for_metric(self, x: dict[Any, Any]) -> Any:
+    def _prediction_for_metric(self, *, x: dict[Any, Any]) -> Any:
         if self._metric.requires_labels:
             return self.model.predict_one(x)
         return self.model.predict_proba_one(x)
 
-    def learn_one(self, x: dict[Any, Any], y: Any, **kwargs: Any) -> None:
-        prediction = self._prediction_for_metric(x)
+    def learn_one(self, x: dict[Any, Any], y: Any, **kwargs: Any) -> None:  # noqa: PLR0917 -- external positional protocol
+        prediction = self._prediction_for_metric(x=x)
         self.model.learn_one(x, y, **kwargs)
         weight = kwargs.get("w", 1.0)
         self._metric.update(y, prediction, w=weight)
@@ -99,7 +94,7 @@ class AutoClassifier(base.Classifier):
             "_generation": self._generation,
         }
 
-    def consider(self, candidate: Candidate, evaluation: Evaluation) -> bool:
+    def consider(self, *, candidate: Candidate, evaluation: Evaluation) -> bool:
         """Promote a candidate when its weekly comparison satisfies the objective."""
         if candidate.parent_generation != self._generation:
             raise ValueError(
@@ -111,7 +106,7 @@ class AutoClassifier(base.Classifier):
             )
         if any(not constraint.metric.works_with(candidate.model) for constraint in self._objective.metric_constraints):
             raise ValueError(f"secondary metric does not work with {type(candidate.model).__name__}")
-        if not self._objective.accepts(evaluation):
+        if not self._objective.accepts(evaluation=evaluation):
             return False
         self.model = candidate.model.clone(include_attributes=True)
         self._generation += 1

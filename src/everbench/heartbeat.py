@@ -18,7 +18,12 @@ class Heartbeat(AbstractContextManager):
     """Writes a shared, durable liveness signal while a worker is running."""
 
     def __init__(
-        self, sessions: sessionmaker[Session], task_name: str | None, role: str, detail: Callable[[], str] | None = None
+        self,
+        *,
+        sessions: sessionmaker[Session],
+        task_name: str | None,
+        role: str,
+        detail: Callable[[], str] | None = None,
     ):
         self.sessions = sessions
         self.task_name = task_name
@@ -33,10 +38,10 @@ class Heartbeat(AbstractContextManager):
             try:
                 with self.sessions.begin() as session:
                     reporting.record_heartbeat(
-                        session,
-                        self.worker_id,
-                        self.task_name,
-                        self.role,
+                        session=session,
+                        worker_id=self.worker_id,
+                        task_name=self.task_name,
+                        role=self.role,
                         detail=self.detail() if self.detail else None,
                     )
             except Exception:

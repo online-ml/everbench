@@ -9,9 +9,8 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from time import perf_counter
 from typing import Any
 
 import boto3
@@ -23,10 +22,12 @@ from everbench import archive_store
 from everbench.config import CONFIG
 from everbench.metrics import MetricTracker
 from everbench.models import PickledModel, metric_inputs_for, prediction_for
+from everbench.records import LabelledExample
+from everbench.replay import read_examples, replay
 from everbench.tasks import TaskDefinition
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PublishedArchive:
     content_sha256: str
     path: str
@@ -52,7 +53,7 @@ def _s3_client():
     )
 
 
-def _publish(task_name: str, week_start: str, content_sha256: str, payload: bytes) -> tuple[str, int]:
+def _publish(*, task_name: str, week_start: str, content_sha256: str, payload: bytes) -> tuple[str, int]:
     """Publish immutable archive bytes to R2, or a local development directory."""
     if CONFIG.s3_bucket_name:
         key = f"task={task_name}/week={week_start}/events-{content_sha256}.parquet"
@@ -72,7 +73,7 @@ def _publish(task_name: str, week_start: str, content_sha256: str, payload: byte
     return str(output), output.stat().st_size
 
 
-def _s3_location(location: str) -> tuple[str, str] | None:
+def _s3_location(*, location: str) -> tuple[str, str] | None:
     if not location.startswith("s3://"):
         return None
     bucket, key = location.removeprefix("s3://").split("/", 1)
@@ -81,8 +82,8 @@ def _s3_location(location: str) -> tuple[str, str] | None:
     return bucket, key
 
 
-def read_archive(location: str) -> bytes:
-    if remote := _s3_location(location):
+def read_archive(*, location: str) -> bytes:
+    if remote := _s3_location(location=location):
         bucket, key = remote
         body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
         try:
@@ -92,9 +93,9 @@ def read_archive(location: str) -> bytes:
     return Path(location).read_bytes()
 
 
-def stream_archive(location: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+def stream_archive(*, location: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
     """Yield an archive without buffering the entire object in web-process memory."""
-    if remote := _s3_location(location):
+    if remote := _s3_location(location=location):
         bucket, key = remote
         body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"]
         try:
@@ -107,23 +108,23 @@ def stream_archive(location: str, chunk_size: int = 1024 * 1024) -> Iterator[byt
             yield chunk
 
 
-def archive_size(location: str) -> int:
-    if remote := _s3_location(location):
+def archive_size(*, location: str) -> int:
+    if remote := _s3_location(location=location):
         bucket, key = remote
         return int(_s3_client().head_object(Bucket=bucket, Key=key)["ContentLength"])
     return Path(location).stat().st_size
 
 
-def delete_archive(location: str) -> None:
+def delete_archive(*, location: str) -> None:
     """Delete a superseded archive object after its manifest has been replaced."""
-    if remote := _s3_location(location):
+    if remote := _s3_location(location=location):
         bucket, key = remote
         _s3_client().delete_object(Bucket=bucket, Key=key)
         return
     Path(location).unlink(missing_ok=True)
 
 
-def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
+def replay_archive(*, task: TaskDefinition, uploaded_model: Any, path: Path | bytes) -> dict[str, Any]:
     """Backtest an uploaded model against an archive.
 
     An event creates a prediction at ``event_available_at``. Its label only
@@ -131,57 +132,31 @@ def replay_archive(task: TaskDefinition, uploaded_model: Any, path: Path | bytes
     delayed-feedback semantics of the live benchmark rather than treating each
     archived row as an immediately labelled example.
     """
-    model = PickledModel("backtest", uploaded_model)
-    tracker = MetricTracker.fresh(task.PROBLEM_TYPE, task.METRICS)
-    parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
-    columns = ["event_id", "event_sequence", "payload_json", "label", "event_available_at", "label_available_at"]
-
-    timeline: list[tuple[datetime, int, int, str, str, dict[str, float] | Any]] = []
-    for batch in parquet.iter_batches(columns=columns):
-        for row in batch.to_pylist():
-            event = json.loads(row["payload_json"])
-            sequence = int(row["event_sequence"])
-            event_id = row["event_id"]
-            event_at = datetime.fromisoformat(row["event_available_at"])
-            label_at = datetime.fromisoformat(row["label_available_at"])
-            # A label may enter the inbox before its matching event. Learning
-            # cannot happen until both exist.
-            label_at = max(label_at, event_at)
-            # Event actions sort before labels at exactly the same time.
-            timeline.append((event_at, 0, sequence, event_id, "event", event))
-            timeline.append((label_at, 1, sequence, event_id, "label", row["label"]))
-
-    predictions: dict[str, tuple[dict[str, float], Any]] = {}
-    predict_seconds = 0.0
-    learn_seconds = 0.0
-    for _, _, _, event_id, action, value in sorted(timeline):
-        if action == "event":
-            event = value
-            started_at = perf_counter()
-            predictions[event_id] = (event, prediction_for(task, model, event_id, event))
-            predict_seconds += perf_counter() - started_at
-            tracker.predictions += 1
-            continue
-        event, prediction = predictions.pop(event_id)
-        target = value
-        tracker.update(target, prediction, lambda metric, y, prediction: metric_inputs_for(task, metric, y, prediction))
-        if model.supports_learning:
-            started_at = perf_counter()
-            model.learn_one(event_id, event, target)
-            learn_seconds += perf_counter() - started_at
+    model = PickledModel(model_id="backtest", model=uploaded_model)
+    tracker = MetricTracker.fresh(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS)
+    result = replay(
+        observations=read_examples(path=path),
+        predict=partial(prediction_for, task=task, model=model),
+        score=lambda *, target, prediction: tracker.update(
+            y_true=target,
+            prediction=prediction,
+            inputs_for=partial(metric_inputs_for, task=task),
+        ),
+        learn=model.learn_one if model.supports_learning else None,
+    )
     return {
-        "predictions": tracker.predictions,
+        "predictions": result.predictions,
         "labels": tracker.observations,
         "metrics": tracker.values(),
         "timing_seconds": {
-            "predict": predict_seconds,
-            "learn": learn_seconds,
-            "total": predict_seconds + learn_seconds,
+            "predict": result.predict_seconds,
+            "learn": result.learn_seconds,
+            "total": result.predict_seconds + result.learn_seconds,
         },
     }
 
 
-def _record(row: dict) -> dict:
+def _record(*, row: dict) -> dict:
     """Use JSON strings for task-varying raw event payloads while keeping tabular columns."""
     return {
         "event_id": row["event_id"],
@@ -196,29 +171,31 @@ def _record(row: dict) -> dict:
     }
 
 
-def _publish_records(task_name: str, week_start: date, records: list[dict]) -> PublishedArchive:
+def _publish_records(*, task_name: str, week_start: date, records: list[dict]) -> PublishedArchive:
     identity = {"task_name": task_name, "records": records}
     content_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     buffer = io.BytesIO()
     pq.write_table(pa.Table.from_pylist(records), buffer, compression="zstd")
-    location, byte_size = _publish(task_name, week_start.isoformat(), content_sha256, buffer.getvalue())
-    return PublishedArchive(content_sha256, location, len(records), byte_size)
+    location, byte_size = _publish(
+        task_name=task_name, week_start=week_start.isoformat(), content_sha256=content_sha256, payload=buffer.getvalue()
+    )
+    return PublishedArchive(content_sha256=content_sha256, path=location, row_count=len(records), byte_size=byte_size)
 
 
-def archive_week_closed(week_start: date, cutoff: datetime) -> bool:
+def archive_week_closed(*, week_start: date, cutoff: datetime) -> bool:
     """Return whether an entire UTC availability week is past the cutoff."""
     week_end = datetime.combine(week_start + timedelta(days=7), time.min, UTC)
     return cutoff >= week_end
 
 
-def archive_cutoff(task: TaskDefinition, now: datetime, minimum_days: int) -> datetime:
+def archive_cutoff(*, task: TaskDefinition, now: datetime, minimum_days: int) -> datetime:
     """Wait for delayed labels and one extra day after a UTC week closes."""
-    label_delay = timedelta(seconds=task.NEGATIVE_LABEL_DELAY_SECONDS or 0)
+    label_delay = timedelta(seconds=task.label_policy.close_after_seconds if task.label_policy else 0)
     retention = max(label_delay + timedelta(days=1), timedelta(days=minimum_days))
     return now - retention
 
 
-def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
+def archive_once(*, sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """Archive one complete availability week into one Parquet file.
 
     Files have a deterministic content-hash name. A crash after file creation
@@ -227,53 +204,60 @@ def archive_once(sessions: sessionmaker[Session], task: TaskDefinition) -> int:
     """
     if not storage_configured():
         raise RuntimeError("configure S3_BUCKET_NAME or EVERBENCH_ARCHIVE_ROOT for durable archives")
-    cutoff = archive_cutoff(task, datetime.now(UTC), CONFIG.archive_after_days)
+    cutoff = archive_cutoff(task=task, now=datetime.now(UTC), minimum_days=CONFIG.archive_after_days)
     with sessions() as session:
-        week_start = archive_store.next_archive_week(session, task.TASK_NAME, cutoff)
+        week_start = archive_store.next_archive_week(session=session, task_name=task.TASK_NAME, cutoff=cutoff)
         if week_start is None:
             return 0
-        if not archive_week_closed(week_start, cutoff):
+        if not archive_week_closed(week_start=week_start, cutoff=cutoff):
             return 0
-        if not archive_store.archive_week_ready(session, task.TASK_NAME, week_start):
+        if not archive_store.archive_week_ready(session=session, task_name=task.TASK_NAME, week_start=week_start):
             return 0
-        rows = archive_store.archive_rows(session, task.TASK_NAME, week_start)
+        rows = archive_store.archive_rows(session=session, task_name=task.TASK_NAME, week_start=week_start)
     if not rows:
         return 0
-    records = [_record(row) for row in rows]
-    published = _publish_records(task.TASK_NAME, week_start, records)
+    records = [_record(row=row) for row in rows]
+    published = _publish_records(task_name=task.TASK_NAME, week_start=week_start, records=records)
     event_ids = [record["event_id"] for record in records]
     with sessions.begin() as session:
         inserted = archive_store.record_archive(
-            session,
-            published.content_sha256,
-            task.TASK_NAME,
-            week_start,
-            published.path,
-            published.row_count,
-            published.byte_size,
+            session=session,
+            content_sha256=published.content_sha256,
+            task_name=task.TASK_NAME,
+            event_date=week_start,
+            path=published.path,
+            row_count=published.row_count,
+            byte_size=published.byte_size,
+            label_count=sum(row["y"] is not None for row in rows),
         )
         if not inserted:
-            existing = archive_store.archive_for_week(session, task.TASK_NAME, week_start)
+            existing = archive_store.archive_for_week(session=session, task_name=task.TASK_NAME, event_date=week_start)
             if existing is None or existing.content_sha256 != published.content_sha256:
                 raise RuntimeError(f"archive week {task.TASK_NAME}/{week_start} already has a different file")
         # The manifest commits with the delete, and only after the immutable
         # file was atomically published. A failed cycle leaves source rows for
         # the next periodic attempt.
-        archive_store.purge_archived_events(session, task.TASK_NAME, event_ids)
+        archive_store.purge_archived_events(session=session, task_name=task.TASK_NAME, event_ids=event_ids)
     return len(records)
 
 
-def latest_labelled_examples(manifests: list, limit: int = 5) -> list[tuple[str, dict[str, Any], object]]:
+def latest_labelled_examples(*, manifests: list, limit: int = 5) -> list[LabelledExample]:
     """Read recent examples from the newest weekly archive files."""
-    examples: list[tuple[str, dict[str, Any], object]] = []
+    examples: list[LabelledExample] = []
     for manifest in manifests:
         if len(examples) >= limit:
             break
-        parquet = pq.ParquetFile(pa.BufferReader(read_archive(manifest.path)))
+        parquet = pq.ParquetFile(pa.BufferReader(read_archive(location=manifest.path)))
         for index in range(parquet.num_row_groups - 1, -1, -1):
             rows = parquet.read_row_group(index, columns=["event_id", "payload_json", "label"]).to_pylist()
             for row in reversed(rows):
-                examples.append((row["event_id"], json.loads(row["payload_json"]), row["label"]))
+                if row["label"] is None:
+                    continue
+                examples.append(
+                    LabelledExample(
+                        event_id=row["event_id"], payload=json.loads(row["payload_json"]), target=row["label"]
+                    )
+                )
                 if len(examples) == limit:
                     break
             if len(examples) == limit:

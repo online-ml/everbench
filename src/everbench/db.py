@@ -17,7 +17,7 @@ def database_url() -> str:
         raise RuntimeError("DATABASE_URL must be set") from error
 
 
-def sqlalchemy_url(url: str | None = None) -> str:
+def sqlalchemy_url(*, url: str | None = None) -> str:
     """Use psycopg 3 for ordinary Postgres and Railway connection URLs."""
     value = url or database_url()
     if value.startswith("postgres://"):
@@ -27,11 +27,11 @@ def sqlalchemy_url(url: str | None = None) -> str:
     return value
 
 
-def make_engine(url: str | None = None) -> Engine:
+def make_engine(*, url: str | None = None) -> Engine:
     # Each Railway worker is single-process. Keep enough connections for its
     # collectors, archiver, heartbeat, and connection-pinned learners.
     return create_engine(
-        sqlalchemy_url(url),
+        sqlalchemy_url(url=url),
         pool_pre_ping=True,
         # Each learner pins one connection while holding its advisory lock.
         # Leave capacity for collectors, heartbeats, and archive work.
@@ -41,11 +41,11 @@ def make_engine(url: str | None = None) -> Engine:
     )
 
 
-def make_session_factory(url: str | None = None) -> sessionmaker[Session]:
-    return sessionmaker(make_engine(url), expire_on_commit=False)
+def make_session_factory(*, url: str | None = None) -> sessionmaker[Session]:
+    return sessionmaker(make_engine(url=url), expire_on_commit=False)
 
 
-def advisory_key(*parts: str) -> int:
+def advisory_key(*, parts: tuple[str, ...]) -> int:
     """Map a namespaced application identity onto PostgreSQL's signed bigint keyspace."""
     digest = blake2b("\0".join(parts).encode(), digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)

@@ -7,10 +7,13 @@ three seconds later. No network connection is required.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
-from threading import Event
+from datetime import UTC, datetime
 
 from river import metrics
+
+from everbench.records import LabelInput, Observation
+from everbench.sources import PollingSource
+from everbench.tasks import LabelPolicy, TaskDefinition
 
 TASK_NAME = "dummy"
 DESCRIPTION_HTML = """
@@ -18,45 +21,29 @@ DESCRIPTION_HTML = """
 """
 PROBLEM_TYPE = "binary_classification"
 METRICS = (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
-EVENT_STREAM_URL = "memory://dummy-events"
-LABEL_STREAM_URL = "memory://dummy-labels"
-NEGATIVE_LABEL_DELAY_SECONDS = None
 
 
-def _tick() -> int:
-    return int(time.time() * 2)
+def poll(*, client):
+    tick = int(time.time() * 2)
+    identifier = f"dummy:{tick}"
+    yield Observation(
+        event_id=identifier,
+        timestamp=tick / 2,
+        payload={"id": identifier, "timestamp": tick / 2, "value": (tick * 17) % 100},
+    )
+    yield LabelInput(
+        event_id=f"dummy:{tick - 6}",
+        y=int((tick - 6) % 5 == 0),
+        reason="synthetic",
+        available_at=datetime.fromtimestamp(tick / 2, UTC),
+    )
 
 
-def event_stream(stop: Event) -> Iterator[dict]:
-    while not stop.is_set():
-        tick = _tick()
-        yield {"id": f"dummy:{tick}", "timestamp": tick / 2, "value": (tick * 17) % 100}
-        stop.wait(0.5)
-
-
-def label_stream(stop: Event) -> Iterator[dict]:
-    while not stop.is_set():
-        tick = _tick() - 6
-        yield {"id": f"dummy:{tick}", "y": int(tick % 5 == 0)}
-        stop.wait(0.5)
-
-
-def event_id(event: dict) -> str | None:
-    return event.get("id")
-
-
-def accepts_event(event: dict) -> bool:
-    return event_id(event) is not None
-
-
-def metric_inputs_for(metric: object, y_true: int, prediction: float) -> tuple[bool, bool | float]:
-    """Accuracy and F1 use a hard decision; ranking/loss metrics use probability."""
-    target = bool(y_true)
-    if isinstance(metric, (metrics.Accuracy, metrics.F1)):
-        return target, prediction >= 0.5
-    return target, prediction
-
-
-def label_for(event: dict) -> tuple[str, int, str] | None:
-    identifier = event.get("id")
-    return (identifier, int(event["y"]), "synthetic") if identifier is not None else None
+TASK = TaskDefinition(
+    TASK_NAME=TASK_NAME,
+    PROBLEM_TYPE=PROBLEM_TYPE,
+    METRICS=METRICS,
+    DESCRIPTION_HTML=DESCRIPTION_HTML,
+    sources=(PollingSource(name="synthetic", interval_seconds=0.5, poll=poll),),
+    label_policy=LabelPolicy(delay_seconds=3),
+)

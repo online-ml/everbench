@@ -20,18 +20,18 @@ PROBLEM_TYPES = frozenset(
 )
 
 
-def _metric_name(metric: Any) -> str:
+def _metric_name(*, metric: Any) -> str:
     return type(metric).__name__
 
 
-def metric_definition(problem_type: str, prototypes: Iterable[Any]) -> dict[str, Any]:
+def metric_definition(*, problem_type: str, prototypes: Iterable[Any]) -> dict[str, Any]:
     """Return a stable description of a task's metric configuration.
 
     River metric instances are task configuration, not shared mutable state.
     The learner clones them once for every model.
     """
     metrics = tuple(prototypes)
-    names = [_metric_name(metric) for metric in metrics]
+    names = [_metric_name(metric=metric) for metric in metrics]
     if problem_type not in PROBLEM_TYPES:
         choices = ", ".join(sorted(PROBLEM_TYPES))
         raise ValueError(f"unknown PROBLEM_TYPE {problem_type!r}; choose one of {choices}")
@@ -54,7 +54,7 @@ def metric_definition(problem_type: str, prototypes: Iterable[Any]) -> dict[str,
     }
 
 
-@dataclass
+@dataclass(kw_only=True)
 class MetricTracker:
     """Independent River metric instances for one (task, model) pair."""
 
@@ -64,17 +64,17 @@ class MetricTracker:
     observations: int = 0
 
     @classmethod
-    def fresh(cls, problem_type: str, prototypes: Iterable[Any], predictions: int = 0) -> MetricTracker:
+    def fresh(cls, *, problem_type: str, prototypes: Iterable[Any], predictions: int = 0) -> MetricTracker:
         prototypes = tuple(prototypes)
-        definition = metric_definition(problem_type, prototypes)
+        definition = metric_definition(problem_type=problem_type, prototypes=prototypes)
         return cls(
             definition=definition,
-            metrics={_metric_name(metric): metric.clone() for metric in prototypes},
+            metrics={_metric_name(metric=metric): metric.clone() for metric in prototypes},
             predictions=predictions,
         )
 
     @classmethod
-    def restore(cls, definition: dict[str, Any], payload: bytes) -> MetricTracker:
+    def restore(cls, *, definition: dict[str, Any], payload: bytes) -> MetricTracker:
         tracker = pickle.loads(payload)
         if not isinstance(tracker, cls):
             raise TypeError("metric checkpoint has an unexpected type")
@@ -85,12 +85,10 @@ class MetricTracker:
             )
         return tracker
 
-    def update(
-        self, y_true: Any, prediction: Any, inputs_for: Callable[[Any, Any, Any], tuple[Any, Any]] | None = None
-    ) -> None:
+    def update(self, *, y_true: Any, prediction: Any, inputs_for: Callable[..., tuple[Any, Any]] | None = None) -> None:
         for metric in self.metrics.values():
             metric_y_true, metric_prediction = (
-                inputs_for(metric, y_true, prediction) if inputs_for else (y_true, prediction)
+                inputs_for(metric=metric, y_true=y_true, prediction=prediction) if inputs_for else (y_true, prediction)
             )
             metric.update(metric_y_true, metric_prediction)
         self.observations += 1

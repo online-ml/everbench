@@ -14,7 +14,7 @@ from everbench.tasks import load_task
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[FlaskClient]:
+def client(*, monkeypatch: pytest.MonkeyPatch) -> Iterator[FlaskClient]:
     monkeypatch.setattr(api, "_session", lambda: SimpleNamespace())
     monkeypatch.setattr(reporting, "worker_health", lambda session: [])
     monkeypatch.setattr(reporting, "task_stats", lambda session, task_name: {"events": 0, "labels": 0})
@@ -25,14 +25,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[FlaskClient]:
         yield test_client
 
 
-def test_dashboard_lists_known_tasks(client: FlaskClient) -> None:
+def test_dashboard_lists_known_tasks(*, client: FlaskClient) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
     assert 'href="/tasks/dummy"' in response.text
 
 
-def test_task_dashboard_loads_refresh_behavior_and_configured_metrics(client: FlaskClient) -> None:
+def test_task_dashboard_loads_refresh_behavior_and_configured_metrics(*, client: FlaskClient) -> None:
     response = client.get("/tasks/dummy")
 
     assert response.status_code == 200
@@ -42,7 +42,7 @@ def test_task_dashboard_loads_refresh_behavior_and_configured_metrics(client: Fl
 
 
 def test_task_dashboard_identifies_archive_downloads_by_filename(
-    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    *, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = "s3://everbench/task=dummy/week=2026-08-31/events-abc123.parquet"
     monkeypatch.setattr(
@@ -67,7 +67,7 @@ def test_task_dashboard_identifies_archive_downloads_by_filename(
     assert path not in response.text
 
 
-def test_task_panel_is_not_cached(client: FlaskClient) -> None:
+def test_task_panel_is_not_cached(*, client: FlaskClient) -> None:
     response = client.get("/tasks/dummy/panel")
 
     assert response.status_code == 200
@@ -75,8 +75,8 @@ def test_task_panel_is_not_cached(client: FlaskClient) -> None:
     assert 'id="task-panel"' in response.text
 
 
-def test_leaderboard_medals_and_default_metric_order(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    def row(model_id: str, accuracy: float | None, log_loss: float) -> dict:
+def test_leaderboard_medals_and_default_metric_order(*, client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def row(*, model_id: str, accuracy: float | None, log_loss: float) -> dict:
         return {
             "model_id": model_id,
             "owner": "test",
@@ -98,10 +98,10 @@ def test_leaderboard_medals_and_default_metric_order(client: FlaskClient, monkey
         reporting,
         "task_leaderboard",
         lambda session, task_name: [
-            row("alpha", 0.8, 0.1),
-            row("beta", 0.9, 0.3),
-            row("gamma", 0.7, 0.2),
-            row("unscored", None, 0.05),
+            row(model_id="alpha", accuracy=0.8, log_loss=0.1),
+            row(model_id="beta", accuracy=0.9, log_loss=0.3),
+            row(model_id="gamma", accuracy=0.7, log_loss=0.2),
+            row(model_id="unscored", accuracy=None, log_loss=0.05),
         ],
     )
 
@@ -127,12 +127,12 @@ def test_leaderboard_medals_and_default_metric_order(client: FlaskClient, monkey
 
 def test_lower_is_better_first_metric_sorts_ascending() -> None:
     view = api.leaderboard_view(
-        [
+        rows=[
             {"model_id": "high", "metrics": {"LogLoss": 0.8}},
             {"model_id": "missing", "metrics": {}},
             {"model_id": "low", "metrics": {"LogLoss": 0.2}},
         ],
-        (metrics.LogLoss(),),
+        configured_metrics=(metrics.LogLoss(),),
     )
 
     assert [row["model_id"] for row in view["leaderboard"]] == ["low", "high", "missing"]
@@ -140,19 +140,22 @@ def test_lower_is_better_first_metric_sorts_ascending() -> None:
 
 
 def test_wiki_primary_metric_sorts_without_changing_saved_metric_configuration() -> None:
-    task = load_task("tasks/wiki_liftwing/task.py")
+    task = load_task(path="tasks/wiki_liftwing/task.py")
     saved = MetricTracker.fresh(
-        task.PROBLEM_TYPE, (metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss())
+        problem_type=task.PROBLEM_TYPE,
+        prototypes=(metrics.Accuracy(), metrics.F1(), metrics.ROCAUC(), metrics.LogLoss()),
     )
-    MetricTracker.restore(metric_definition(task.PROBLEM_TYPE, task.METRICS), saved.payload())
+    MetricTracker.restore(
+        definition=metric_definition(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS), payload=saved.payload()
+    )
 
     view = api.leaderboard_view(
-        [
+        rows=[
             {"model_id": "accurate", "metrics": {"Accuracy": 0.9, "ROCAUC": 0.7}},
             {"model_id": "best_auc", "metrics": {"Accuracy": 0.8, "ROCAUC": 0.9}},
         ],
-        task.METRICS,
-        task.LEADERBOARD_PRIMARY_METRIC,
+        configured_metrics=task.METRICS,
+        primary_metric=task.LEADERBOARD_PRIMARY_METRIC,
     )
 
     assert view["leaderboard_metrics"][0]["name"] == "ROCAUC"
@@ -160,7 +163,7 @@ def test_wiki_primary_metric_sorts_without_changing_saved_metric_configuration()
 
 
 def test_failure_icon_is_rendered_outside_the_scrollable_table(
-    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    *, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         reporting,
@@ -195,8 +198,8 @@ def test_failure_icon_is_rendered_outside_the_scrollable_table(
     assert 'data-model-id="failed-model"' in response.text
 
 
-def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    def row(model_id: str, score: float, created_at: datetime) -> dict:
+def test_recent_models_are_separated_without_medals(*, client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def row(*, model_id: str, score: float, created_at: datetime) -> dict:
         return {
             "model_id": model_id,
             "owner": "test",
@@ -219,8 +222,8 @@ def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeyp
         reporting,
         "task_leaderboard",
         lambda session, task_name: [
-            row("established", 0.5, now - timedelta(days=4)),
-            row("recent", 0.99, now - timedelta(days=1)),
+            row(model_id="established", score=0.5, created_at=now - timedelta(days=4)),
+            row(model_id="recent", score=0.99, created_at=now - timedelta(days=1)),
         ],
     )
 
@@ -236,13 +239,13 @@ def test_recent_models_are_separated_without_medals(client: FlaskClient, monkeyp
     assert response.text.count('class="leaderboard-predictions-column"') == 2
 
 
-def test_unknown_task_panel_is_not_found(client: FlaskClient) -> None:
+def test_unknown_task_panel_is_not_found(*, client: FlaskClient) -> None:
     response = client.get("/tasks/unknown/panel")
 
     assert response.status_code == 404
 
 
-def test_status_requires_an_api_key(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_requires_an_api_key(*, client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EVERBENCH_API_KEY", raising=False)
 
     response = client.get("/api/status")

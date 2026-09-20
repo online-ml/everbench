@@ -15,17 +15,14 @@ USER_AGENT = "everbench/0.1 (https://github.com/online-ml/everbench)"
 READ_TIMEOUT_SECONDS = 10
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class StreamMessage:
     payload: dict
     event_id: str | None
 
 
 def subscribe(
-    name: str,
-    url: str,
-    stop: threading.Event | None = None,
-    last_event_id: Callable[[], str | None] | None = None,
+    *, name: str, url: str, stop: threading.Event | None = None, last_event_id: Callable[[], str | None] | None = None
 ) -> Iterator[StreamMessage]:
     """Reconnect from the caller's last durably committed SSE cursor."""
     stop = stop or threading.Event()
@@ -58,7 +55,7 @@ def subscribe(
                             logging.warning("ignoring malformed %s event", name)
                             continue
                         if isinstance(payload, dict):
-                            yield StreamMessage(payload, current_event_id)
+                            yield StreamMessage(payload=payload, event_id=current_event_id)
                         else:
                             logging.warning("ignoring non-object %s event", name)
             except (httpx.HTTPError, SSEError) as error:

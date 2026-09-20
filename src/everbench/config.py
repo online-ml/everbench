@@ -7,15 +7,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 
-def _int(name: str, default: int) -> int:
+def _int(*, name: str, default: int) -> int:
     return int(os.getenv(name, default))
 
 
-def _float(name: str, default: float) -> float:
+def _float(*, name: str, default: float) -> float:
     return float(os.getenv(name, default))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RuntimeConfig:
     ingest_batch_size: int = 200
     ingest_flush_seconds: float = 5.0
@@ -87,42 +87,54 @@ class RuntimeConfig:
         default_ca = "/etc/ssl/cert.pem" if Path("/etc/ssl/cert.pem").is_file() else None
         return replace(
             defaults,
-            ingest_batch_size=_int("EVERBENCH_INGEST_BATCH_SIZE", defaults.ingest_batch_size),
-            ingest_flush_seconds=_float("EVERBENCH_INGEST_FLUSH_SECONDS", defaults.ingest_flush_seconds),
-            ingest_max_pending_items=_int("EVERBENCH_INGEST_MAX_PENDING_ITEMS", defaults.ingest_max_pending_items),
-            stream_cursor_checkpoint_seconds=_float(
-                "EVERBENCH_STREAM_CURSOR_CHECKPOINT_SECONDS", defaults.stream_cursor_checkpoint_seconds
+            ingest_batch_size=_int(name="EVERBENCH_INGEST_BATCH_SIZE", default=defaults.ingest_batch_size),
+            ingest_flush_seconds=_float(name="EVERBENCH_INGEST_FLUSH_SECONDS", default=defaults.ingest_flush_seconds),
+            ingest_max_pending_items=_int(
+                name="EVERBENCH_INGEST_MAX_PENDING_ITEMS", default=defaults.ingest_max_pending_items
             ),
-            learner_batch_size=_int("EVERBENCH_LEARN_BATCH_SIZE", defaults.learner_batch_size),
-            learner_idle_seconds=_float("EVERBENCH_LEARN_IDLE_SECONDS", defaults.learner_idle_seconds),
-            heartbeat_seconds=_float("EVERBENCH_HEARTBEAT_SECONDS", defaults.heartbeat_seconds),
-            hot_event_capacity=_int("EVERBENCH_HOT_EVENT_CAPACITY", defaults.hot_event_capacity),
-            hot_event_max_bytes=_int("EVERBENCH_HOT_EVENT_MAX_BYTES", defaults.hot_event_max_bytes),
-            shutdown_flush_seconds=_float("EVERBENCH_SHUTDOWN_FLUSH_SECONDS", defaults.shutdown_flush_seconds),
-            archive_after_days=_int("EVERBENCH_ARCHIVE_AFTER_DAYS", defaults.archive_after_days),
-            archive_interval_seconds=_float("EVERBENCH_ARCHIVE_INTERVAL_SECONDS", defaults.archive_interval_seconds),
+            stream_cursor_checkpoint_seconds=_float(
+                name="EVERBENCH_STREAM_CURSOR_CHECKPOINT_SECONDS", default=defaults.stream_cursor_checkpoint_seconds
+            ),
+            learner_batch_size=_int(name="EVERBENCH_LEARN_BATCH_SIZE", default=defaults.learner_batch_size),
+            learner_idle_seconds=_float(name="EVERBENCH_LEARN_IDLE_SECONDS", default=defaults.learner_idle_seconds),
+            heartbeat_seconds=_float(name="EVERBENCH_HEARTBEAT_SECONDS", default=defaults.heartbeat_seconds),
+            hot_event_capacity=_int(name="EVERBENCH_HOT_EVENT_CAPACITY", default=defaults.hot_event_capacity),
+            hot_event_max_bytes=_int(name="EVERBENCH_HOT_EVENT_MAX_BYTES", default=defaults.hot_event_max_bytes),
+            shutdown_flush_seconds=_float(
+                name="EVERBENCH_SHUTDOWN_FLUSH_SECONDS", default=defaults.shutdown_flush_seconds
+            ),
+            archive_after_days=_int(name="EVERBENCH_ARCHIVE_AFTER_DAYS", default=defaults.archive_after_days),
+            archive_interval_seconds=_float(
+                name="EVERBENCH_ARCHIVE_INTERVAL_SECONDS", default=defaults.archive_interval_seconds
+            ),
             archive_root=Path(value) if (value := os.getenv("EVERBENCH_ARCHIVE_ROOT")) else None,
             s3_bucket_name=os.getenv("S3_BUCKET_NAME"),
             s3_endpoint_url=os.getenv("S3_ENDPOINT_URL"),
             s3_region=os.getenv("S3_REGION", defaults.s3_region),
             s3_ca_bundle=os.getenv("S3_CA_BUNDLE") or default_ca,
-            max_model_bytes=_int("EVERBENCH_MAX_MODEL_BYTES", defaults.max_model_bytes),
+            max_model_bytes=_int(name="EVERBENCH_MAX_MODEL_BYTES", default=defaults.max_model_bytes),
             max_class_definition_bytes=_int(
-                "EVERBENCH_MAX_CLASS_DEFINITION_BYTES", defaults.max_class_definition_bytes
+                name="EVERBENCH_MAX_CLASS_DEFINITION_BYTES", default=defaults.max_class_definition_bytes
             ),
-            model_checkpoint_seconds=_float("EVERBENCH_MODEL_CHECKPOINT_SECONDS", defaults.model_checkpoint_seconds),
-            max_model_snapshot_bytes=_int("EVERBENCH_MAX_MODEL_SNAPSHOT_BYTES", defaults.max_model_snapshot_bytes),
+            model_checkpoint_seconds=_float(
+                name="EVERBENCH_MODEL_CHECKPOINT_SECONDS", default=defaults.model_checkpoint_seconds
+            ),
+            max_model_snapshot_bytes=_int(
+                name="EVERBENCH_MAX_MODEL_SNAPSHOT_BYTES", default=defaults.max_model_snapshot_bytes
+            ),
             max_active_models_per_task=_int(
-                "EVERBENCH_MAX_ACTIVE_MODELS_PER_TASK", defaults.max_active_models_per_task
+                name="EVERBENCH_MAX_ACTIVE_MODELS_PER_TASK", default=defaults.max_active_models_per_task
             ),
             model_retry_initial_seconds=_float(
-                "EVERBENCH_MODEL_RETRY_INITIAL_SECONDS", defaults.model_retry_initial_seconds
+                name="EVERBENCH_MODEL_RETRY_INITIAL_SECONDS", default=defaults.model_retry_initial_seconds
             ),
-            model_retry_max_seconds=_float("EVERBENCH_MODEL_RETRY_MAX_SECONDS", defaults.model_retry_max_seconds),
-            max_backtest_bytes=_int("EVERBENCH_MAX_BACKTEST_BYTES", defaults.max_backtest_bytes),
-            max_backtest_rows=_int("EVERBENCH_MAX_BACKTEST_ROWS", defaults.max_backtest_rows),
+            model_retry_max_seconds=_float(
+                name="EVERBENCH_MODEL_RETRY_MAX_SECONDS", default=defaults.model_retry_max_seconds
+            ),
+            max_backtest_bytes=_int(name="EVERBENCH_MAX_BACKTEST_BYTES", default=defaults.max_backtest_bytes),
+            max_backtest_rows=_int(name="EVERBENCH_MAX_BACKTEST_ROWS", default=defaults.max_backtest_rows),
             label_inbox_retention_days=_int(
-                "EVERBENCH_LABEL_INBOX_RETENTION_DAYS", defaults.label_inbox_retention_days
+                name="EVERBENCH_LABEL_INBOX_RETENTION_DAYS", default=defaults.label_inbox_retention_days
             ),
         )
 

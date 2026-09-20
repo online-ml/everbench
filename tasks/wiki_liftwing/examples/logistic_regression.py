@@ -18,7 +18,7 @@ class WikiFeatureLogisticRegression:
         self.model = preprocessing.StandardScaler() | linear_model.LogisticRegression(optimizer=optim.SGD(0.03))
 
     @staticmethod
-    def transform(event: dict[str, Any]) -> dict[str, float]:
+    def transform(*, event: dict[str, Any]) -> dict[str, float]:
         change = event.get("length") or {}
         anonymous = float(bool(event.get("user_is_anon")))
         comment_length = float(len(event.get("comment") or ""))
@@ -36,13 +36,13 @@ class WikiFeatureLogisticRegression:
             "anonymous_short_comment": anonymous * float(comment_length < 10),
         }
 
-    def predict_proba_one(self, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
+    def predict_proba_one(self, *, event_id: str, event: dict[str, Any]) -> dict[bool, float]:
         del event_id
-        return self.model.predict_proba_one(self.transform(event))
+        return self.model.predict_proba_one(self.transform(event=event))
 
-    def learn_one(self, event_id: str, event: dict[str, Any], label: int) -> None:
+    def learn_one(self, *, event_id: str, event: dict[str, Any], label: int) -> None:
         del event_id
-        self.model.learn_one(self.transform(event), bool(label))
+        self.model.learn_one(self.transform(event=event), bool(label))
 
 
 def main() -> None:

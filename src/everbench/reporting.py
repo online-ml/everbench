@@ -14,6 +14,7 @@ from everbench.schema import AutoExperiment, TaskRegistration, WorkerHeartbeat
 
 
 def record_heartbeat(
+    *,
     session: Session,
     worker_id: str,
     task_name: str | None,
@@ -32,16 +33,16 @@ def record_heartbeat(
     session.execute(statement)
 
 
-def worker_health(session: Session) -> list[WorkerHeartbeat]:
+def worker_health(*, session: Session) -> list[WorkerHeartbeat]:
     return list(session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.role, WorkerHeartbeat.worker_id)))
 
 
-def task_names(session: Session) -> list[str]:
+def task_names(*, session: Session) -> list[str]:
     """List task names registered at startup or first accepted event."""
     return list(session.scalars(select(TaskRegistration.task_name).order_by(TaskRegistration.task_name)))
 
 
-def register_tasks(session: Session, task_names: list[str]) -> None:
+def register_tasks(*, session: Session, task_names: list[str]) -> None:
     """Make startup registration safe when web and worker services start together."""
     if task_names:
         session.execute(
@@ -51,13 +52,14 @@ def register_tasks(session: Session, task_names: list[str]) -> None:
         )
 
 
-def task_stats(session: Session, task_name: str) -> dict[str, int]:
+def task_stats(*, session: Session, task_name: str) -> dict[str, int]:
     row = (
         session.execute(
             text(
                 """SELECT COALESCE(task.live_events, 0) + archived.row_count AS events,
-                      COALESCE(task.live_labels, 0) + archived.row_count AS labels
-                 FROM (SELECT COALESCE(SUM(row_count), 0) AS row_count
+                      COALESCE(task.live_labels, 0) + archived.label_count AS labels
+                 FROM (SELECT COALESCE(SUM(row_count), 0) AS row_count,
+                              COALESCE(SUM(COALESCE(label_count, row_count)), 0) AS label_count
                          FROM archive_manifest WHERE task_name = :task_name) AS archived
                  LEFT JOIN benchmark_tasks AS task ON task.task_name = :task_name"""
             ),
@@ -69,7 +71,7 @@ def task_stats(session: Session, task_name: str) -> dict[str, int]:
     return {"events": int(row["events"]), "labels": int(row["labels"])}
 
 
-def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
+def task_leaderboard(*, session: Session, task_name: str) -> list[dict[str, Any]]:
     rows = session.execute(
         text(
             """SELECT model.model_id,
@@ -101,7 +103,7 @@ def task_leaderboard(session: Session, task_name: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, Any] | None:
+def model_detail(*, session: Session, task_name: str, model_id: str) -> dict[str, Any] | None:
     row = (
         session.execute(
             text(
@@ -141,9 +143,9 @@ def model_detail(session: Session, task_name: str, model_id: str) -> dict[str, A
             )
         }
         detail["class_definition"] = documented_source(
-            detail["class_definition"],
-            metadata,
-            auto_store.recent_experiments(session, task_name, model_id, limit=5),
-            counts,
+            source=detail["class_definition"],
+            metadata=metadata,
+            experiments=auto_store.recent_experiments(session=session, task_name=task_name, model_id=model_id, limit=5),
+            counts=counts,
         )
     return detail

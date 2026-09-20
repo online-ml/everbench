@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from sqlalchemy import text
@@ -22,64 +23,71 @@ from everbench.models import PickledModel, metric_inputs_for, prediction_for
 from everbench.tasks import TaskDefinition
 
 
-def _task_lock(task_name: str) -> int:
-    return advisory_key("learner", task_name)
+def _task_lock(*, task_name: str) -> int:
+    return advisory_key(parts=("learner", task_name))
 
 
-def _load_model(session: Session, task: TaskDefinition, registration):
-    snapshot = model_store.latest_snapshot(session, task.TASK_NAME, registration.model_id)
-    artifact_record = model_store.artifact(session, snapshot.artifact_id) if snapshot is not None else None
+def _load_model(*, session: Session, task: TaskDefinition, registration):
+    snapshot = model_store.latest_snapshot(session=session, task_name=task.TASK_NAME, model_id=registration.model_id)
+    artifact_record = (
+        model_store.artifact(session=session, artifact_id=snapshot.artifact_id) if snapshot is not None else None
+    )
     if artifact_record is None and registration.artifact_id:
-        artifact_record = model_store.artifact(session, registration.artifact_id)
+        artifact_record = model_store.artifact(session=session, artifact_id=registration.artifact_id)
     if artifact_record is None:
         raise RuntimeError(f"pickle artifact missing for {registration.model_id}")
-    model = artifacts.loads(artifact_record.payload, artifact_record.signature)
-    return PickledModel(registration.model_id, model), snapshot
+    model = artifacts.loads(payload=artifact_record.payload, signature=artifact_record.signature)
+    return PickledModel(model_id=registration.model_id, model=model), snapshot
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CachedModel:
     fingerprint: tuple[Any, ...]
     model: PickledModel
     tracker: MetricTracker
     checkpointed_at: float
+    needs_checkpoint: bool = False
+
+
+@dataclass(slots=True, kw_only=True)
+class LearningResult:
+    model_id: str
+    trained: int = 0
+    predicted: int = 0
+    evaluated: int = 0
+    resolved: int = 0
+
+    @property
+    def processed(self) -> bool:
+        return bool(self.resolved or self.predicted)
 
 
 def _restore_uncheckpointed_learning(
-    session: Session, task: TaskDefinition, registration, model: PickledModel, snapshot
+    *, session: Session, task: TaskDefinition, registration, model: PickledModel, snapshot
 ) -> None:
     """Recover labels learned after the last durable model checkpoint."""
     if not model.supports_learning:
         return
-    # Snapshots created before checkpoint watermarks existed were written after
-    # every learning batch. Treat them as authoritative to avoid replaying
-    # their already-included history twice.
-    if (
-        snapshot is not None
-        and snapshot.checkpoint_label_available_at is None
-        and snapshot.checkpoint_ready_sequence is None
+    for example in model_store.trained_examples_since_checkpoint(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        checkpoint_ready_sequence=snapshot.checkpoint_ready_sequence if snapshot is not None else 0,
     ):
-        return
-    for event_id, event, y in model_store.trained_examples_since_checkpoint(
-        session,
-        task.TASK_NAME,
-        registration.model_id,
-        snapshot.checkpoint_label_available_at if snapshot is not None else None,
-        snapshot.checkpoint_event_sequence if snapshot is not None else None,
-        snapshot.checkpoint_ready_sequence if snapshot is not None else None,
-    ):
-        model.learn_one(event_id, event, y)
+        model.learn_one(event_id=example.event_id, event=example.payload, label=example.target)
 
 
-def _events(session: Session, task_name: str, event_ids: list[str], hot: HotStore | None) -> dict[str, dict[str, Any]]:
+def _events(
+    *, session: Session, task_name: str, event_ids: list[str], hot: HotStore | None
+) -> dict[str, dict[str, Any]]:
     """Read raw events from memory, then bulk-fall back to Postgres."""
-    values = {event_id: hot.event(event_id) for event_id in event_ids} if hot is not None else {}
+    values = {event_id: hot.event(event_id=event_id) for event_id in event_ids} if hot is not None else {}
     missing = [event_id for event_id in event_ids if values.get(event_id) is None]
     if missing:
-        recovered = event_store.event_payloads(session, task_name, missing)
+        recovered = event_store.event_payloads(session=session, task_name=task_name, event_ids=missing)
         if hot is not None:
             for event_id, event in recovered.items():
-                hot.put(event_id, event)
+                hot.put(event_id=event_id, event=event)
         values.update(recovered)
     absent = {event_id for event_id in event_ids if values.get(event_id) is None}
     if absent:
@@ -88,11 +96,11 @@ def _events(session: Session, task_name: str, event_ids: list[str], hot: HotStor
 
 
 def _active_models(
-    session: Session, task: TaskDefinition, cache: dict[str, CachedModel]
+    *, session: Session, task: TaskDefinition, cache: dict[str, CachedModel]
 ) -> list[tuple[Any, CachedModel]]:
     """Keep models resident while noticing API additions and deactivations."""
-    registrations = model_store.runnable_registrations(session, task.TASK_NAME)
-    definition = metric_definition(task.PROBLEM_TYPE, task.METRICS)
+    registrations = model_store.runnable_registrations(session=session, task_name=task.TASK_NAME)
+    definition = metric_definition(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS)
     active_ids = {registration.model_id for registration in registrations}
     for model_id in set(cache) - active_ids:
         cache.pop(model_id)
@@ -103,39 +111,42 @@ def _active_models(
         try:
             if cached is None or cached.fingerprint != fingerprint:
                 cache.pop(registration.model_id, None)
-                persisted = model_store.model_metric_state(session, task.TASK_NAME, registration.model_id)
+                persisted = model_store.model_metric_state(
+                    session=session, task_name=task.TASK_NAME, model_id=registration.model_id
+                )
                 tracker = (
-                    MetricTracker.restore(definition, persisted.state)
+                    MetricTracker.restore(definition=definition, payload=persisted.state)
                     if persisted is not None
                     else MetricTracker.fresh(
-                        task.PROBLEM_TYPE,
-                        task.METRICS,
-                        model_store.model_prediction_count(session, task.TASK_NAME, registration.model_id),
+                        problem_type=task.PROBLEM_TYPE,
+                        prototypes=task.METRICS,
+                        predictions=model_store.model_prediction_count(
+                            session=session, task_name=task.TASK_NAME, model_id=registration.model_id
+                        ),
                     )
                 )
-                model, snapshot = _load_model(session, task, registration)
-                _restore_uncheckpointed_learning(session, task, registration, model, snapshot)
-                # A legacy/no checkpoint must be upgraded on its next learning
-                # batch before source rows can be archived.
-                checkpointed_at = (
-                    time.monotonic()
-                    if snapshot is not None
-                    and (
-                        snapshot.checkpoint_ready_sequence is not None
-                        or snapshot.checkpoint_label_available_at is not None
-                    )
-                    else 0.0
+                model, snapshot = _load_model(session=session, task=task, registration=registration)
+                _restore_uncheckpointed_learning(
+                    session=session, task=task, registration=registration, model=model, snapshot=snapshot
                 )
-                cache[registration.model_id] = CachedModel(fingerprint, model, tracker, checkpointed_at)
+                checkpointed_at = time.monotonic() if snapshot is not None else 0.0
+                cache[registration.model_id] = CachedModel(
+                    fingerprint=fingerprint,
+                    model=model,
+                    tracker=tracker,
+                    checkpointed_at=checkpointed_at,
+                    needs_checkpoint=registration.label_cursor_sequence
+                    > (snapshot.checkpoint_ready_sequence if snapshot is not None else 0),
+                )
         except Exception as error:
             cache.pop(registration.model_id, None)
             retry_at = model_store.record_model_failure(
-                session,
-                task.TASK_NAME,
-                registration.model_id,
-                error,
-                CONFIG.model_retry_initial_seconds,
-                CONFIG.model_retry_max_seconds,
+                session=session,
+                task_name=task.TASK_NAME,
+                model_id=registration.model_id,
+                error=error,
+                retry_initial_seconds=CONFIG.model_retry_initial_seconds,
+                retry_max_seconds=CONFIG.model_retry_max_seconds,
             )
             logging.exception("could not load model %s; retry_at=%s", registration.model_id, retry_at)
             continue
@@ -143,145 +154,191 @@ def _active_models(
     return models
 
 
+def _predict_pending(*, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot) -> int:
+    pending = event_store.events_after_cursor(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        cursor_sequence=registration.prediction_cursor_sequence,
+        start_sequence=registration.start_sequence,
+        limit=CONFIG.learner_batch_size,
+    )
+    skipped = [row.event_id for row in pending if row.resolved and not row.has_state]
+    event_store.add_prediction_skips(
+        session=session, task_name=task.TASK_NAME, model_id=registration.model_id, event_ids=skipped
+    )
+    predictable = [row.event_id for row in pending if not row.resolved and not row.has_state]
+    payloads = _events(session=session, task_name=task.TASK_NAME, event_ids=predictable, hot=hot)
+    predictions = {
+        identifier: prediction_for(task=task, model=cached.model, event_id=identifier, event=payloads[identifier])
+        for identifier in predictable
+    }
+    inserted = set(
+        event_store.add_predictions(
+            session=session, task_name=task.TASK_NAME, model_id=registration.model_id, predictions=predictions
+        )
+    )
+    raced = [identifier for identifier in predictable if identifier not in inserted]
+    event_store.add_prediction_skips(
+        session=session, task_name=task.TASK_NAME, model_id=registration.model_id, event_ids=raced
+    )
+    cached.tracker.predictions += len(inserted)
+    if pending:
+        registration.prediction_cursor_sequence = pending[-1].sequence
+    return len(inserted)
+
+
+def _process_resolutions(
+    *, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot
+) -> LearningResult:
+    resolutions = event_store.ready_labels_after_cursor(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        cursor_sequence=registration.label_cursor_sequence,
+        start_sequence=registration.start_sequence,
+        limit=CONFIG.learner_batch_size,
+    )
+    missing = [row.event_id for row in resolutions if row.prediction_status is None]
+    event_store.add_prediction_skips(
+        session=session, task_name=task.TASK_NAME, model_id=registration.model_id, event_ids=missing
+    )
+    predicted = [row for row in resolutions if row.prediction_status == "predicted" and not row.evaluated]
+    evaluable = [row for row in predicted if row.target is not None]
+    for row in evaluable:
+        cached.tracker.update(
+            y_true=row.target,
+            prediction=row.prediction,
+            inputs_for=partial(metric_inputs_for, task=task),
+        )
+    # Unavailable targets settle the prediction without contributing a score.
+    event_store.add_metric_updates(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        event_ids=[row.event_id for row in predicted],
+    )
+    untrained = [row for row in resolutions if not row.trained]
+    learnable = [row for row in untrained if row.target is not None]
+    if cached.model.supports_learning:
+        payloads = _events(
+            session=session, task_name=task.TASK_NAME, event_ids=[row.event_id for row in learnable], hot=hot
+        )
+        for row in learnable:
+            cached.model.learn_one(event_id=row.event_id, event=payloads[row.event_id], label=row.target)
+    event_store.add_trainings(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        event_ids=[row.event_id for row in untrained],
+    )
+    if resolutions:
+        cached.needs_checkpoint = True
+        registration.label_cursor_sequence = resolutions[-1].sequence
+        if hot is not None:
+            hot.mark_labelled(event_ids=[row.event_id for row in resolutions])
+    return LearningResult(
+        model_id=registration.model_id, resolved=len(resolutions), trained=len(learnable), evaluated=len(evaluable)
+    )
+
+
+def _checkpoint(*, session: Session, task: TaskDefinition, cached: CachedModel, ready_sequence: int) -> None:
+    payload = cached.model.payload()
+    if len(payload) > CONFIG.max_model_snapshot_bytes:
+        raise ValueError(
+            f"serialized model is {len(payload):,} bytes; limit is {CONFIG.max_model_snapshot_bytes:,} bytes"
+        )
+    model_store.save_pickle_snapshot(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=cached.model.model_id,
+        payload=payload,
+        checkpoint_ready_sequence=ready_sequence,
+    )
+    cached.checkpointed_at = time.monotonic()
+    cached.needs_checkpoint = False
+
+
 def _learn_model(
-    session: Session, task: TaskDefinition, registration, cached: CachedModel, hot: HotStore | None
-) -> tuple[int, int, int]:
-    """Process one model in the caller's savepoint."""
-    model, tracker = cached.model, cached.tracker
-    events = event_store.events_after_cursor(
-        session,
-        task.TASK_NAME,
-        model.model_id,
-        registration.prediction_cursor_sequence,
-        registration.start_sequence,
-        CONFIG.learner_batch_size,
-    )
-    prelabelled = [event_id for event_id, _, labelled, has_state in events if labelled and not has_state]
-    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, prelabelled)
-    predictable = [event_id for event_id, _, labelled, has_state in events if not labelled and not has_state]
-    prediction_events = _events(session, task.TASK_NAME, predictable, hot)
-    predictions = [
-        (
-            event_id,
-            prediction_for(task, model, event_id, prediction_events[event_id]),
-        )
-        for event_id in predictable
-    ]
-    inserted_predictions = set(event_store.add_predictions(session, task.TASK_NAME, model.model_id, predictions))
-    raced_labels = [event_id for event_id, _ in predictions if event_id not in inserted_predictions]
-    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, raced_labels)
-    tracker.predictions += len(inserted_predictions)
-    if events:
-        registration.prediction_cursor_sequence = events[-1][1]
-
-    labels = event_store.ready_labels_after_cursor(
-        session,
-        task.TASK_NAME,
-        model.model_id,
-        registration.label_cursor_sequence,
-        registration.start_sequence,
-        CONFIG.learner_batch_size,
-    )
-    missing_state = [row[1] for row in labels if row[6] is None]
-    event_store.add_prediction_skips(session, task.TASK_NAME, model.model_id, missing_state)
-    evaluations = [row for row in labels if row[6] == "predicted" and not row[7]]
-    for row in evaluations:
-        tracker.update(
-            row[2],
-            row[5],
-            lambda metric, target, value: metric_inputs_for(task, metric, target, value),
-        )
-    event_store.add_metric_updates(session, task.TASK_NAME, model.model_id, [row[1] for row in evaluations])
-    untrained = [row for row in labels if not row[8]]
-    if hot is not None:
-        hot.mark_labelled([row[1] for row in labels])
-    if model.supports_learning:
-        label_events = _events(session, task.TASK_NAME, [row[1] for row in untrained], hot)
-        for row in untrained:
-            model.learn_one(row[1], label_events[row[1]], row[2])
-    event_store.add_trainings(session, task.TASK_NAME, model.model_id, [row[1] for row in untrained])
-    if labels:
-        registration.label_cursor_sequence = labels[-1][0]
-
-    if labels or evaluations or predictions:
+    *, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot: HotStore | None
+) -> LearningResult:
+    """Predict, resolve, and checkpoint within the caller's savepoint."""
+    predicted = _predict_pending(session=session, task=task, registration=registration, cached=cached, hot=hot)
+    result = _process_resolutions(session=session, task=task, registration=registration, cached=cached, hot=hot)
+    result.predicted = predicted
+    if result.processed:
+        tracker = cached.tracker
         model_store.save_metric_state(
-            session,
-            task.TASK_NAME,
-            model.model_id,
-            tracker.definition,
-            tracker.payload(),
-            tracker.predictions,
-            tracker.observations,
-            tracker.values(),
+            session=session,
+            task_name=task.TASK_NAME,
+            model_id=registration.model_id,
+            definition=tracker.definition,
+            state=tracker.payload(),
+            predictions=tracker.predictions,
+            observations=tracker.observations,
+            values=tracker.values(),
         )
-        if labels and time.monotonic() - cached.checkpointed_at >= CONFIG.model_checkpoint_seconds:
-            ready_sequence, _, _, label_available_at, event_sequence, *_ = labels[-1]
-            payload = model.payload()
-            if len(payload) > CONFIG.max_model_snapshot_bytes:
-                raise ValueError(
-                    f"serialized model is {len(payload):,} bytes; limit is {CONFIG.max_model_snapshot_bytes:,} bytes"
-                )
-            model_store.save_pickle_snapshot(
-                session,
-                task.TASK_NAME,
-                model.model_id,
-                payload,
-                label_available_at,
-                event_sequence,
-                ready_sequence,
-            )
-            cached.checkpointed_at = time.monotonic()
-    return len(untrained), len(inserted_predictions), len(evaluations)
+    if cached.needs_checkpoint and time.monotonic() - cached.checkpointed_at >= CONFIG.model_checkpoint_seconds:
+        _checkpoint(session=session, task=task, cached=cached, ready_sequence=registration.label_cursor_sequence)
+    return result
 
 
 def learn_once(
+    *,
     session: Session,
     task: TaskDefinition,
     cache: dict[str, CachedModel] | None = None,
     hot: HotStore | None = None,
     completed_hot_events: list[str] | None = None,
-) -> list[tuple[str, int, int, int]]:
+) -> list[LearningResult]:
     cache = cache if cache is not None else {}
     results = []
     initially_disabled_model_ids = set()
-    for registration in model_store.disabled_registrations(session, task.TASK_NAME):
+    for registration in model_store.disabled_registrations(session=session, task_name=task.TASK_NAME):
         cache.pop(registration.model_id, None)
-        model_store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
+        model_store.record_disabled_work(
+            session=session, task_name=task.TASK_NAME, registration=registration, limit=CONFIG.learner_batch_size
+        )
         initially_disabled_model_ids.add(registration.model_id)
-    for registration, cached in _active_models(session, task, cache):
+    for registration, cached in _active_models(session=session, task=task, cache=cache):
         try:
             with session.begin_nested():
-                trained, predicted, evaluated = _learn_model(session, task, registration, cached, hot)
+                result = _learn_model(session=session, task=task, registration=registration, cached=cached, hot=hot)
         except Exception as error:
             cache.pop(registration.model_id, None)
             retry_at = model_store.record_model_failure(
-                session,
-                task.TASK_NAME,
-                registration.model_id,
-                error,
-                CONFIG.model_retry_initial_seconds,
-                CONFIG.model_retry_max_seconds,
+                session=session,
+                task_name=task.TASK_NAME,
+                model_id=registration.model_id,
+                error=error,
+                retry_initial_seconds=CONFIG.model_retry_initial_seconds,
+                retry_max_seconds=CONFIG.model_retry_max_seconds,
             )
             logging.exception("model %s failed; retry_at=%s", registration.model_id, retry_at)
             continue
-        if trained or predicted or evaluated:
-            model_store.record_model_success(session, task.TASK_NAME, registration.model_id)
-        results.append((registration.model_id, trained, predicted, evaluated))
-    for registration in model_store.disabled_registrations(session, task.TASK_NAME):
+        if result.processed:
+            model_store.record_model_success(session=session, task_name=task.TASK_NAME, model_id=registration.model_id)
+        results.append(result)
+    for registration in model_store.disabled_registrations(session=session, task_name=task.TASK_NAME):
         if registration.model_id in initially_disabled_model_ids:
             continue
         cache.pop(registration.model_id, None)
-        model_store.record_disabled_work(session, task.TASK_NAME, registration, CONFIG.learner_batch_size)
+        model_store.record_disabled_work(
+            session=session, task_name=task.TASK_NAME, registration=registration, limit=CONFIG.learner_batch_size
+        )
     if hot is not None:
-        completed = event_store.completed_labelled_events(session, task.TASK_NAME, hot.labelled_event_ids())
+        completed = event_store.completed_labelled_events(
+            session=session, task_name=task.TASK_NAME, event_ids=hot.labelled_event_ids()
+        )
         if completed_hot_events is None:
-            hot.discard(completed)
+            hot.discard(event_ids=completed)
         else:
             completed_hot_events.extend(completed)
     return results
 
 
 def learner(
+    *,
     sessions: sessionmaker[Session],
     task: TaskDefinition,
     once: bool = False,
@@ -298,28 +355,30 @@ def learner(
     # not the SQLAlchemy Session. Pin that connection until this learner exits.
     with engine.connect() as connection, sessions(bind=connection) as session:
         acquired = session.scalar(
-            text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _task_lock(task.TASK_NAME)}
+            text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _task_lock(task_name=task.TASK_NAME)}
         )
         if not acquired:
             raise RuntimeError(f"another learner is already running for {task.TASK_NAME}")
         session.commit()
         try:
-            with Heartbeat(sessions, task.TASK_NAME, "learner") if heartbeat else nullcontext():
+            with Heartbeat(sessions=sessions, task_name=task.TASK_NAME, role="learner") if heartbeat else nullcontext():
                 while not stop.is_set():
                     try:
                         completed_hot_events: list[str] = []
-                        results = learn_once(session, task, models, hot, completed_hot_events)
+                        results = learn_once(
+                            session=session, task=task, cache=models, hot=hot, completed_hot_events=completed_hot_events
+                        )
                         session.commit()
                         if hot is not None:
-                            hot.discard(completed_hot_events)
-                        for model_id, trained, predicted, evaluated in results:
-                            if trained or predicted or evaluated:
+                            hot.discard(event_ids=completed_hot_events)
+                        for result in results:
+                            if result.processed:
                                 logging.info(
                                     "%s: trained=%d predicted=%d evaluated=%d",
-                                    model_id,
-                                    trained,
-                                    predicted,
-                                    evaluated,
+                                    result.model_id,
+                                    result.trained,
+                                    result.predicted,
+                                    result.evaluated,
                                 )
                     except Exception:
                         session.rollback()
@@ -335,7 +394,9 @@ def learner(
         finally:
             models.clear()
             try:
-                session.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _task_lock(task.TASK_NAME)})
+                session.execute(
+                    text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _task_lock(task_name=task.TASK_NAME)}
+                )
                 session.commit()
             except Exception:
                 # Do not return a connection with an unknown lock state to the pool.
