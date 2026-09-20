@@ -1,23 +1,12 @@
-"""Build a scoring-only Lift Wing predictor for the wiki-liftwing task.
-
-This file is deliberately outside Everbench's runtime. It is an ordinary
-user-owned model definition which cloudpickle embeds in ``liftwing.pkl``.
-
-Example:
-    uv run python tasks/wiki_liftwing/examples/liftwing_revertrisk.py --user-agent 'name (email)'
-"""
+"""A scoring-only Lift Wing predictor for the wiki-liftwing task."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import time
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
-import cloudpickle
 
 
 class LiftWingRevertRisk:
@@ -67,28 +56,3 @@ class LiftWingRevertRisk:
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Lift Wing returned an unexpected revert-risk response") from error
         return {False: 1.0 - risk, True: risk}
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--user-agent", required=True, help="Descriptive contact User-Agent for Wikimedia")
-    parser.add_argument("--timeout-seconds", type=float, default=1.5)
-    parser.add_argument("--max-attempts", type=int, default=2)
-    parser.add_argument("--backoff-seconds", type=float, default=0.25)
-    parser.add_argument("--output", type=Path, default=Path("liftwing.pkl"))
-    args = parser.parse_args()
-    try:
-        model = LiftWingRevertRisk(
-            user_agent=args.user_agent,
-            timeout_seconds=args.timeout_seconds,
-            max_attempts=args.max_attempts,
-            backoff_seconds=args.backoff_seconds,
-        )
-    except ValueError as error:
-        parser.error(str(error))
-    args.output.write_bytes(cloudpickle.dumps(model))
-    print(args.output)
-
-
-if __name__ == "__main__":
-    main()

@@ -64,4 +64,4 @@ known-first-party = ["everbench"]
 
 [tool.ty.environment]
 python-version = "3.11"
-root = ["src"]
+root = ["src", "."]

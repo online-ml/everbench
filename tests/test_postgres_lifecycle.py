@@ -747,7 +747,7 @@ def test_deleting_registration_cascades_all_model_event_state(*, sessions: sessi
         )
 
 
-def test_forecast_snapshot_resolves_two_polls_ahead_and_missing_target_is_archived(
+def test_forecast_snapshot_resolves_four_polls_ahead_and_missing_target_is_archived(
     *, sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from everbench.tasks import load_task
@@ -775,14 +775,14 @@ def test_forecast_snapshot_resolves_two_polls_ahead_and_missing_target_is_archiv
             events=[
                 Observation(
                     event_id="early",
-                    timestamp=(origin + timedelta(minutes=15)).timestamp(),
+                    timestamp=(origin + timedelta(minutes=45)).timestamp(),
                     payload={},
                     entity_key="station",
                     value=99,
                 ),
                 Observation(
                     event_id="target",
-                    timestamp=(origin + timedelta(minutes=30)).timestamp(),
+                    timestamp=(origin + timedelta(minutes=60)).timestamp(),
                     payload={},
                     entity_key="station",
                     value=0,
@@ -812,6 +812,42 @@ def test_forecast_snapshot_resolves_two_polls_ahead_and_missing_target_is_archiv
 
         rows = list(read_examples(path=Path(manifest.path)))
         assert sum(row.target is None for row in rows) == 3
+
+
+@pytest.mark.parametrize("seconds,matched", [(3299, False), (3300, True), (3600, True), (3900, True), (3901, False)])
+def test_citibike_target_window(*, sessions: sessionmaker[Session], seconds: int, matched: bool) -> None:
+    task_name = f"forecast-window-{uuid4()}"
+    policy = load_task(path="tasks/citibike/task.py").label_policy
+    origin = datetime.now(UTC).timestamp()
+    with sessions.begin() as session:
+        event_store.add_events(
+            session=session,
+            task_name=task_name,
+            policy=policy,
+            events=[Observation(event_id="origin", timestamp=origin, payload={}, entity_key="station", value=12)],
+        )
+        event_store.add_events(
+            session=session,
+            task_name=task_name,
+            policy=policy,
+            events=[
+                Observation(event_id="later", timestamp=origin + seconds, payload={}, entity_key="station", value=3)
+            ],
+        )
+        label = session.get(BenchmarkLabel, {"task_name": task_name, "event_id": "origin"})
+        assert (label is not None) == matched
+        if label is not None:
+            assert label.y == 3
+            event_store.add_events(
+                session=session,
+                task_name=task_name,
+                policy=policy,
+                events=[
+                    Observation(event_id="last", timestamp=origin + 3900, payload={}, entity_key="station", value=99)
+                ],
+            )
+            session.refresh(label)
+            assert label.y == 3
 
 
 def test_new_generation_does_not_replay_old_live_training(*, sessions: sessionmaker[Session]) -> None:

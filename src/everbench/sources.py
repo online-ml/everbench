@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from threading import Event
@@ -49,8 +50,9 @@ class PollingSource:
     def read(self, *, stop: Event, cursor: Callable[[], str | None]) -> Iterator[SourceMessage]:
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             while not stop.is_set():
+                started_at = time.monotonic()
                 try:
                     yield SourceMessage(records=tuple(self.poll(client=client)))
                 except (httpx.HTTPError, KeyError, TypeError, ValueError):
                     logging.exception("%s poll failed; retrying next interval", self.name)
-                stop.wait(timeout=self.interval_seconds)
+                stop.wait(timeout=max(0.0, self.interval_seconds - (time.monotonic() - started_at)))
