@@ -41,6 +41,9 @@ upload-models = [
 [tool.uv]
 default-groups = ["dev", "upload-models"]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
