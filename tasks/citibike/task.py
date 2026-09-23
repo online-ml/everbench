@@ -5,9 +5,11 @@ from __future__ import annotations
 import time
 from collections import deque
 from collections.abc import Iterator
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
-from river import metrics
+from river import feature_extraction, metrics, stats
 
 from everbench.records import Observation
 from everbench.sources import PollingSource
@@ -60,18 +62,46 @@ def snapshot_events(*, information: dict, status: dict, observed_at: float) -> I
 
 
 class CitiBikeFeed:
-    """Cache metadata and four compact snapshots for causal lag features."""
+    """Cache metadata, short lags and grouped statistics for causal features."""
 
     def __init__(self) -> None:
         self.feeds: dict[str, str] = {}
         self.information: dict = {}
         self.refreshed_at = 0.0
         self.history: deque[dict[str, dict]] = deque(maxlen=4)
+        self.averages = {
+            f"occupancy_{statistic}_by_{group}": feature_extraction.Agg(on="occupancy", by=by, how=how)
+            for group, by, fading_factor in (
+                ("station", ["station_id"], 1 - 2 ** (-1 / 96)),
+                ("station_hour", ["station_id", "hour"], 1 - 2 ** (-1 / 28)),
+            )
+            for statistic, how in (
+                ("mean", stats.Mean()),
+                ("ewm", stats.EWMean(fading_factor=fading_factor)),
+                ("count", stats.Count()),
+            )
+        }
+
+    def station_averages(self, *, event: dict) -> dict[str, float]:
+        """Observe current occupancy, then query the profile at the target hour."""
+        row = {
+            "station_id": event["station_id"],
+            "hour": datetime.fromtimestamp(event["timestamp"], ZoneInfo("America/New_York")).hour,
+            "occupancy": event["station_status"]["num_bikes_available"]
+            / max(float(event["station_information"].get("capacity", 0)), 1.0),
+        }
+        for aggregate in self.averages.values():
+            aggregate.learn_one(row)
+        row["hour"] = datetime.fromtimestamp(event["target_timestamp"], ZoneInfo("America/New_York")).hour
+        return {
+            name: float(next(iter(aggregate.transform_one(row).values()))) for name, aggregate in self.averages.items()
+        }
 
     def observations(self, *, status: dict, observed_at: float) -> Iterator[Observation]:
         snapshot = {}
         for event in snapshot_events(information=self.information, status=status, observed_at=observed_at):
             station_id = event["station_id"]
+            event["station_averages"] = self.station_averages(event=event)
             event["history"] = [
                 previous[station_id]
                 for previous in self.history

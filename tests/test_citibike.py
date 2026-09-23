@@ -144,7 +144,10 @@ def test_poll_retries_http_failure_and_uses_discovery(*, monkeypatch):
             self.waits += 1
 
     messages = list(task.TASK.sources[0].read(stop=Stop(), cursor=lambda: None))
-    assert [record.payload for message in messages for record in message.records] == [{**event(), "history": []}]
+    payloads = [record.payload for message in messages for record in message.records]
+    assert len(payloads) == 1
+    assert payloads[0] == {**event(), "history": [], "station_averages": payloads[0]["station_averages"]}
+    assert payloads[0]["station_averages"]["occupancy_mean_by_station"] == pytest.approx(12 / 30)
     assert calls[-2:] == ["https://test/info", "https://test/status"]
 
 
@@ -232,6 +235,65 @@ def test_missing_lags_and_restart_use_current_occupancy_without_fake_history():
     values = shared.features(event=payload)
     assert values["occupancy_lag_15m"] == values["occupancy"]
     assert values["has_lag_15m"] == values["history_count"] == 0
+
+
+def test_station_averages_use_observation_hour_and_query_target_hour_without_mixing_stations():
+    feed = task.CitiBikeFeed()
+    retained = None
+    # NOW is 08:00 in New York. Learn 08:00 and 09:00 profiles on day one,
+    # then forecast 09:00 from 08:00 on day two.
+    for timestamp, bikes in ((NOW, 6), (NOW + 3600, 24), (NOW + 86400, 12)):
+        info, status = observation(timestamp=timestamp, bikes=bikes)
+        other_info, other_status = observation(timestamp=timestamp, station_id="other", bikes=0)
+        info["data"]["stations"].extend(other_info["data"]["stations"])
+        status["data"]["stations"].extend(other_status["data"]["stations"])
+        feed.information = info
+        first, other = list(feed.observations(status=status, observed_at=timestamp))
+        assert other.payload["station_averages"]["occupancy_mean_by_station"] == 0
+        if retained is None:
+            retained = first.payload
+            frozen_features = shared.features(event=retained)
+    averages = first.payload["station_averages"]
+    assert averages["occupancy_mean_by_station"] == pytest.approx(14 / 30)
+    assert averages["occupancy_count_by_station"] == 3
+    assert averages["occupancy_mean_by_station_hour"] == pytest.approx(24 / 30)
+    assert averages["occupancy_count_by_station_hour"] == 1
+    alpha = 1 - 2 ** (-1 / 96)
+    expected_ewm = ((6 / 30) * (1 - alpha) + (24 / 30) * alpha) * (1 - alpha) + (12 / 30) * alpha
+    assert averages["occupancy_ewm_by_station"] == pytest.approx(expected_ewm)
+    features = shared.features(event=first.payload)
+    assert features["occupancy_mean_by_station_hour_minus_current"] == pytest.approx(12 / 30)
+    assert features["log_occupancy_count_by_station"] == pytest.approx(math.log1p(3))
+    assert shared.features(event=retained) == frozen_features
+
+
+def test_station_averages_fall_back_for_older_events_and_unseen_hours():
+    payload = event(bikes=18)
+    values = shared.features(event=payload)
+    for group in ("station", "station_hour"):
+        assert values[f"occupancy_mean_by_{group}"] == pytest.approx(18 / 30)
+        assert values[f"occupancy_ewm_by_{group}_minus_current"] == 0
+        assert values[f"log_occupancy_count_by_{group}"] == 0
+    feed = task.CitiBikeFeed()
+    for timestamp, bikes in ((NOW, 6), (NOW + 900, 18)):
+        info, status = observation(timestamp=timestamp, bikes=bikes)
+        feed.information = info
+        payload = list(feed.observations(status=status, observed_at=timestamp))[0].payload
+    values = shared.features(event=payload)
+    assert values["occupancy_mean_by_station_hour"] == pytest.approx(12 / 30)
+    assert values["log_occupancy_count_by_station_hour"] == 0
+
+
+def test_station_hour_averages_follow_new_york_daylight_saving_time():
+    feed = task.CitiBikeFeed()
+    # The historical observation and forecast target are both 09:00 locally,
+    # on opposite sides of the DST change.
+    summer = datetime(2026, 10, 31, 13, tzinfo=UTC).timestamp()
+    winter = datetime(2026, 11, 1, 13, tzinfo=UTC).timestamp()  # 08:00, forecasting 09:00
+    feed.station_averages(event=event(timestamp=summer, bikes=24))
+    values = feed.station_averages(event=event(timestamp=winter, bikes=6))
+    assert values["occupancy_mean_by_station_hour"] == pytest.approx(24 / 30)
+    assert values["occupancy_count_by_station_hour"] == 1
 
 
 def test_capacity_normalization_transfers_proportional_changes_between_stations():

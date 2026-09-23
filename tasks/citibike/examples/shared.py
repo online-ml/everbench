@@ -44,6 +44,19 @@ def features(*, event: dict) -> dict[Hashable, float]:
     occupancies = [row["bikes"] / max(float(row["capacity"]), 1.0) for row in history]
     result["occupancy_mean_60m"] = sum([occupancy, *occupancies]) / (len(occupancies) + 1)
     result["history_count"] = float(len(history))
+    averages = event.get("station_averages", {})
+    for statistic in ("mean", "ewm"):
+        station = averages.get(f"occupancy_{statistic}_by_station", occupancy)
+        hourly = (
+            averages[f"occupancy_{statistic}_by_station_hour"]
+            if averages.get("occupancy_count_by_station_hour", 0)
+            else station
+        )
+        for group, average in (("station", station), ("station_hour", hourly)):
+            result[f"occupancy_{statistic}_by_{group}"] = float(average)
+            result[f"occupancy_{statistic}_by_{group}_minus_current"] = average - occupancy
+    for group in ("station", "station_hour"):
+        result[f"log_occupancy_count_by_{group}"] = math.log1p(averages.get(f"occupancy_count_by_{group}", 0))
     return result
 
 
