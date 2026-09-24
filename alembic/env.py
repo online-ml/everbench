@@ -5,16 +5,13 @@ import os
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-from everbench.db import sqlalchemy_url
 from everbench.schema import Base
 
 config = context.config
 if url := os.getenv("DATABASE_URL"):
-    config.set_main_option("sqlalchemy.url", sqlalchemy_url(url=url))
+    config.set_main_option("sqlalchemy.url", url)
 else:
-    raise RuntimeError(
-        "DATABASE_URL must be set before running Alembic, for example: postgresql://USER:PASSWORD@HOST:5432/everbench"
-    )
+    raise RuntimeError("DATABASE_URL must be set before running Alembic, for example: sqlite:///everbench.db")
 target_metadata = Base.metadata
 
 

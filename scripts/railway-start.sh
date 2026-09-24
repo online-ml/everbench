@@ -9,9 +9,6 @@ fi
 
 export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-10}"
 .venv/bin/everbench migrate
-if [ "${EVERBENCH_IMPORT_POSTGRES:-0}" = "1" ]; then
-    .venv/bin/everbench import-postgres
-fi
 
 set --
 for task_name in ${EVERBENCH_TASK_NAMES:-wiki-liftwing}; do

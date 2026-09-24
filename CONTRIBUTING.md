@@ -10,7 +10,7 @@ uv run everbench migrate
 
 Set `DATABASE_URL` in `.env` to a SQLite file path. The file is ignored by Git. Production uses one Railway service with a persistent volume mounted at `/data`; the web server, task worker, and weekly researcher share that file. Set `DATABASE_URL=sqlite:////data/everbench.db` and `EVERBENCH_ARCHIVE_ROOT=/data/archives` there.
 
-When upgrading an existing installation, stop workers before running migrations, then restart them with the new code. The one-time PostgreSQL transfer uses `POSTGRES_SOURCE_URL` and `uv run everbench import-postgres` after the SQLite schema is initialized. Keep the source database stopped for writes during the transfer, and verify the destination before deleting it.
+When upgrading an existing installation, stop workers before running `everbench migrate`, then restart them with the new code. Keep the SQLite database on persistent storage and take a consistent backup before changing the schema.
 
 Run the benchmark worker in one terminal:
 

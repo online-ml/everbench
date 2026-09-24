@@ -12,23 +12,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: everbench_test
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-        options: >-
-          --health-cmd "pg_isready -U postgres -d everbench_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-        ports:
-          - 5432:5432
     env:
       DATABASE_URL: sqlite:///ci.db
-      EVERBENCH_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/everbench_test
 
     steps:
       - name: Check out repository
@@ -44,9 +29,6 @@ jobs:
 
       - name: Check formatting, linting, types, and the lockfile
         run: uv run prek run --all-files
-
-      - name: Prepare legacy PostgreSQL source
-        run: DATABASE_URL="$EVERBENCH_TEST_DATABASE_URL" uv run alembic upgrade head
 
       - name: Initialize SQLite
         run: uv run everbench migrate

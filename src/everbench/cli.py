@@ -9,13 +9,12 @@ from pathlib import Path
 import click
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect
-from sqlalchemy.orm import Session
 
 from alembic import command
 from everbench import artifacts, reporting
 from everbench.collectors import collect_source
 from everbench.db import make_engine, make_session_factory
-from everbench.schema import Base, DatabaseMigration
+from everbench.schema import Base
 from everbench.tasks import discover_tasks, load_task
 
 
@@ -169,33 +168,6 @@ def migrate() -> None:
             command.upgrade(AlembicConfig(str(alembic_config)), "head")
     finally:
         engine.dispose()
-
-
-@main.command("import-postgres")
-@click.option("--source-url", envvar="POSTGRES_SOURCE_URL", required=True, hide_input=True)
-def import_postgres(*, source_url: str) -> None:
-    """Copy a stopped Postgres benchmark into an empty SQLite database."""
-    from everbench.sqlite_migration import copy_postgres_to_sqlite, sync_sequence_floors
-
-    target = make_engine()
-    with Session(target) as session:
-        if session.get(DatabaseMigration, "postgres-import") is not None:
-            source = make_engine(url=source_url)
-            try:
-                sync_sequence_floors(source=source, target=target)
-            finally:
-                source.dispose()
-            target.dispose()
-            click.echo("Postgres import already completed; sequence floors verified")
-            return
-    source = make_engine(url=source_url)
-    try:
-        counts = copy_postgres_to_sqlite(source=source, target=target)
-    finally:
-        source.dispose()
-        target.dispose()
-    for table, count in sorted(counts.items()):
-        click.echo(f"{table}: {count}")
 
 
 @main.command("register-tasks")

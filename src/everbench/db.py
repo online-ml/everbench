@@ -17,42 +17,26 @@ def database_url() -> str:
         raise RuntimeError("DATABASE_URL must be set") from error
 
 
-def sqlalchemy_url(*, url: str | None = None) -> str:
-    """Use psycopg 3 for ordinary Postgres and Railway connection URLs."""
-    value = url or database_url()
-    if value.startswith("postgres://"):
-        value = "postgresql://" + value.removeprefix("postgres://")
-    if value.startswith("postgresql://"):
-        value = "postgresql+psycopg://" + value.removeprefix("postgresql://")
-    return value
-
-
 def make_engine(*, url: str | None = None) -> Engine:
-    value = sqlalchemy_url(url=url)
-    if value.startswith("sqlite:"):
-        engine = create_engine(
-            value,
-            pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "10")),
-            max_overflow=0,
-            connect_args={"timeout": 120, "check_same_thread": False},
-        )
-
-        @event.listens_for(engine, "connect")
-        def configure_sqlite(connection, _record) -> None:  # noqa: PLR0917 -- SQLAlchemy callback
-            cursor = connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=120000")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-        return engine
-    return create_engine(
+    value = url or database_url()
+    if not value.startswith("sqlite:"):
+        raise ValueError("DATABASE_URL must point to a SQLite database")
+    engine = create_engine(
         value,
-        pool_pre_ping=True,
         pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "10")),
         max_overflow=0,
-        connect_args={"application_name": os.getenv("RAILWAY_SERVICE_NAME", "everbench")},
+        connect_args={"timeout": 120, "check_same_thread": False},
     )
+
+    @event.listens_for(engine, "connect")
+    def configure_sqlite(connection, _record) -> None:  # noqa: PLR0917 -- SQLAlchemy callback
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=120000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return engine
 
 
 def make_session_factory(*, url: str | None = None) -> sessionmaker[Session]:
