@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import artifacts, event_store, model_store
 from everbench.config import CONFIG
+from everbench.db import lock_transaction
 from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
@@ -293,6 +294,10 @@ def learn_once(
     hot: HotStore | None = None,
     completed_hot_events: list[str] | None = None,
 ) -> list[LearningResult]:
+    # Claim SQLite's writer slot before loading models or reading cursors.
+    # A read transaction upgraded after a collector commits fails with
+    # SQLITE_BUSY_SNAPSHOT even when busy_timeout is configured.
+    lock_transaction(session=session, name=f"learner:{task.TASK_NAME}")
     cache = cache if cache is not None else {}
     results = []
     initially_disabled_model_ids = set()

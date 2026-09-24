@@ -34,14 +34,14 @@ def make_engine(*, url: str | None = None) -> Engine:
             value,
             pool_size=int(os.getenv("EVERBENCH_DB_POOL_SIZE", "10")),
             max_overflow=0,
-            connect_args={"timeout": 30, "check_same_thread": False},
+            connect_args={"timeout": 120, "check_same_thread": False},
         )
 
         @event.listens_for(engine, "connect")
         def configure_sqlite(connection, _record) -> None:  # noqa: PLR0917 -- SQLAlchemy callback
             cursor = connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA busy_timeout=120000")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
