@@ -6,4 +6,4 @@ This is a platform to host live, never-ending benchmarks. The goal is to evaluat
 
 Each task defines its sources, prediction target and metrics. Sources collect observations and resolve earlier targets; models predict first, then learn and update their metrics when the targets become available. Missing targets are recorded explicitly and excluded from learning and scoring. Completed observations are archived into weekly Parquet files, and backtests and autonomous research use the same delayed replay.
 
-The [Citi Bike benchmark](tasks/citibike/README.md) polls every 15 minutes and predicts available bikes at each NYC station one hour ahead, with one shared model across all stations. Ground truth comes from the first snapshot collected 55–65 minutes later. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and upgrade instructions.
+The live Wikipedia revert-risk benchmark evaluates predictions against later moderation outcomes. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and upgrade instructions.

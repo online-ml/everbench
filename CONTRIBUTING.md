@@ -5,12 +5,12 @@
 ```bash
 cp .env.example .env
 uv sync --locked
-uv run alembic upgrade head
+uv run everbench migrate
 ```
 
-Set `DATABASE_URL` in `.env`. The file is ignored by Git.
+Set `DATABASE_URL` in `.env` to a SQLite file path. The file is ignored by Git. Production uses one Railway service with a persistent volume mounted at `/data`; the web server, task worker, and weekly researcher share that file. Set `DATABASE_URL=sqlite:////data/everbench.db` and `EVERBENCH_ARCHIVE_ROOT=/data/archives` there.
 
-When upgrading an existing installation, stop workers before running migrations, then restart them with the new code. Migration 0022 converts old timestamp checkpoints to sequence checkpoints; installations with legacy snapshots need their existing `EVERBENCH_MODEL_SIGNING_KEY` available during this one-time conversion.
+When upgrading an existing installation, stop workers before running migrations, then restart them with the new code. The one-time PostgreSQL transfer uses `POSTGRES_SOURCE_URL` and `uv run everbench import-postgres` after the SQLite schema is initialized. Keep the source database stopped for writes during the transfer, and verify the destination before deleting it.
 
 Run the benchmark worker in one terminal:
 
@@ -31,7 +31,7 @@ Run the quality checks before committing:
 ```bash
 uv run prek install
 uv run prek run --all-files
-uv run pytest -q
+uv run python -m pytest -q
 ```
 
 To see the dashboard move without waiting for real-world labels, run the local synthetic task instead:

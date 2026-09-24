@@ -8,12 +8,14 @@ from pathlib import Path
 
 import click
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import text
+from sqlalchemy import inspect
+from sqlalchemy.orm import Session
 
 from alembic import command
 from everbench import artifacts, reporting
 from everbench.collectors import collect_source
-from everbench.db import advisory_key, make_engine, make_session_factory
+from everbench.db import make_engine, make_session_factory
+from everbench.schema import Base, DatabaseMigration
 from everbench.tasks import discover_tasks, load_task
 
 
@@ -65,11 +67,16 @@ def worker(*, task_file: str) -> None:
     type=click.Path(exists=True, file_okay=False, path_type=str),
 )
 @click.option("--task", "task_names", multiple=True, help="Run only the named task (repeatable).")
-def worker_all(*, tasks_directory: str, task_names: tuple[str, ...]) -> None:
+@click.option("--schedule-research", is_flag=True, help="Run weekly research in this worker process.")
+def worker_all(*, tasks_directory: str, task_names: tuple[str, ...], schedule_research: bool) -> None:
     """Run every top-level task definition in one supervised process."""
     from everbench.runtime import run_tasks
 
-    run_tasks(sessions=make_session_factory(), tasks=discover_tasks(directory=tasks_directory, task_names=task_names))
+    run_tasks(
+        sessions=make_session_factory(),
+        tasks=discover_tasks(directory=tasks_directory, task_names=task_names),
+        schedule_research=schedule_research,
+    )
 
 
 @main.group("auto")
@@ -145,24 +152,45 @@ def auto_worker_all(*, tasks_directory: str) -> None:
 
 @main.command()
 def migrate() -> None:
-    """Upgrade Postgres schema while holding the deployment-wide migration lock."""
-    # The production package is installed non-editably in site-packages, while
-    # Alembic's configuration and revisions remain in Railway's /app checkout.
+    """Initialize SQLite from the canonical schema, then apply future revisions."""
     root = Path.cwd()
     alembic_config = root / "alembic.ini"
     if not alembic_config.is_file():
         raise click.ClickException(f"alembic.ini not found in project directory: {root}")
     engine = make_engine()
     try:
-        with engine.connect() as connection:
-            lock_id = advisory_key(parts=("migrations",))
-            connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": lock_id})
-            try:
-                command.upgrade(AlembicConfig(str(alembic_config)), "head")
-            finally:
-                connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
+        if engine.dialect.name != "sqlite":
+            raise click.ClickException("migrate requires a SQLite DATABASE_URL")
+        fresh = not inspect(engine).has_table("benchmark_events")
+        if fresh:
+            Base.metadata.create_all(engine)
+            command.stamp(AlembicConfig(str(alembic_config)), "head")
+        else:
+            command.upgrade(AlembicConfig(str(alembic_config)), "head")
     finally:
         engine.dispose()
+
+
+@main.command("import-postgres")
+@click.option("--source-url", envvar="POSTGRES_SOURCE_URL", required=True, hide_input=True)
+def import_postgres(*, source_url: str) -> None:
+    """Copy a stopped Postgres benchmark into an empty SQLite database."""
+    from everbench.sqlite_migration import copy_postgres_to_sqlite
+
+    target = make_engine()
+    with Session(target) as session:
+        if session.get(DatabaseMigration, "postgres-import") is not None:
+            click.echo("Postgres import already completed")
+            target.dispose()
+            return
+    source = make_engine(url=source_url)
+    try:
+        counts = copy_postgres_to_sqlite(source=source, target=target)
+    finally:
+        source.dispose()
+        target.dispose()
+    for table, count in sorted(counts.items()):
+        click.echo(f"{table}: {count}")
 
 
 @main.command("register-tasks")

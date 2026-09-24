@@ -10,21 +10,23 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import artifacts, event_store, model_store
 from everbench.config import CONFIG
-from everbench.db import advisory_key
 from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
 from everbench.models import PickledModel, metric_inputs_for, prediction_for
 from everbench.tasks import TaskDefinition
 
+_learner_locks: dict[str, threading.Lock] = {}
+_learner_locks_guard = threading.Lock()
 
-def _task_lock(*, task_name: str) -> int:
-    return advisory_key(parts=("learner", task_name))
+
+def _task_lock(*, task_name: str) -> threading.Lock:
+    with _learner_locks_guard:
+        return _learner_locks.setdefault(task_name, threading.Lock())
 
 
 def _load_model(*, session: Session, task: TaskDefinition, registration):
@@ -80,7 +82,7 @@ def _restore_uncheckpointed_learning(
 def _events(
     *, session: Session, task_name: str, event_ids: list[str], hot: HotStore | None
 ) -> dict[str, dict[str, Any]]:
-    """Read raw events from memory, then bulk-fall back to Postgres."""
+    """Read raw events from memory, then bulk-fall back to SQLite."""
     values = {event_id: hot.event(event_id=event_id) for event_id in event_ids} if hot is not None else {}
     missing = [event_id for event_id in event_ids if values.get(event_id) is None]
     if missing:
@@ -348,19 +350,11 @@ def learner(
 ) -> None:
     stop = stop or threading.Event()
     models: dict[str, CachedModel] = {}
-    engine = sessions.kw.get("bind")
-    if engine is None:
-        raise RuntimeError("learner session factory is not bound to an engine")
-    # PostgreSQL session-level advisory locks belong to the physical connection,
-    # not the SQLAlchemy Session. Pin that connection until this learner exits.
-    with engine.connect() as connection, sessions(bind=connection) as session:
-        acquired = session.scalar(
-            text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _task_lock(task_name=task.TASK_NAME)}
-        )
-        if not acquired:
-            raise RuntimeError(f"another learner is already running for {task.TASK_NAME}")
-        session.commit()
-        try:
+    task_lock = _task_lock(task_name=task.TASK_NAME)
+    if not task_lock.acquire(blocking=False):
+        raise RuntimeError(f"another learner is already running for {task.TASK_NAME}")
+    try:
+        with sessions() as session:
             with Heartbeat(sessions=sessions, task_name=task.TASK_NAME, role="learner") if heartbeat else nullcontext():
                 while not stop.is_set():
                     try:
@@ -391,13 +385,6 @@ def learner(
                     if once:
                         return
                     stop.wait(CONFIG.learner_idle_seconds)
-        finally:
-            models.clear()
-            try:
-                session.execute(
-                    text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _task_lock(task_name=task.TASK_NAME)}
-                )
-                session.commit()
-            except Exception:
-                # Do not return a connection with an unknown lock state to the pool.
-                connection.invalidate()
+    finally:
+        models.clear()
+        task_lock.release()

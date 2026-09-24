@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +23,7 @@ from everbench.metrics import MetricTracker
 from everbench.records import Observation
 from everbench.schema import (
     ArchiveManifest,
+    Base,
     BenchmarkEvent,
     BenchmarkLabel,
     MetricState,
@@ -59,11 +59,10 @@ class CountingModel:
 
 
 @pytest.fixture(scope="module")
-def sessions() -> Iterator[sessionmaker[Session]]:
-    if os.getenv("EVERBENCH_RUN_POSTGRES_TESTS") != "1":
-        pytest.skip("requires EVERBENCH_RUN_POSTGRES_TESTS=1")
-    url = os.getenv("EVERBENCH_TEST_DATABASE_URL") or os.environ["DATABASE_URL"]
-    factory = make_session_factory(url=url)
+def sessions(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sessionmaker[Session]]:  # noqa: PLR0917 -- pytest fixture
+    path = tmp_path_factory.mktemp("sqlite-lifecycle") / "everbench.db"
+    factory = make_session_factory(url=f"sqlite:///{path}")
+    Base.metadata.create_all(factory.kw["bind"])
     yield factory
     bind = factory.kw.get("bind")
     if bind is not None:
@@ -72,7 +71,7 @@ def sessions() -> Iterator[sessionmaker[Session]]:
 
 @pytest.fixture(autouse=True)
 def signing_key(*, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "postgres-test-signing-key")
+    monkeypatch.setenv("EVERBENCH_MODEL_SIGNING_KEY", "sqlite-test-signing-key")
 
 
 def test_archive_removes_predictions_before_events(
@@ -577,7 +576,7 @@ def test_event_completion_requires_a_model_checkpoint(*, sessions: sessionmaker[
         ]
 
 
-def test_archive_purge_accepts_more_than_postgres_parameter_limit(*, sessions: sessionmaker[Session]) -> None:
+def test_archive_purge_accepts_more_than_sqlite_parameter_limit(*, sessions: sessionmaker[Session]) -> None:
     with sessions.begin() as session:
         archive_store.purge_archived_events(
             session=session,
@@ -753,7 +752,11 @@ def test_forecast_snapshot_resolves_four_polls_ahead_and_missing_target_is_archi
     from everbench.tasks import load_task
 
     task_name = f"forecast-test-{uuid4()}"
-    task = replace(load_task(path="tasks/citibike/task.py"), TASK_NAME=task_name)
+    task = replace(
+        load_task(path="tasks/dummy/task.py"),
+        TASK_NAME=task_name,
+        label_policy=LabelPolicy(delay_seconds=3300, tolerance_seconds=600),
+    )
     origin = datetime.now(UTC) - timedelta(days=15)
     policy = task.label_policy
     assert policy is not None
@@ -815,9 +818,9 @@ def test_forecast_snapshot_resolves_four_polls_ahead_and_missing_target_is_archi
 
 
 @pytest.mark.parametrize("seconds,matched", [(3299, False), (3300, True), (3600, True), (3900, True), (3901, False)])
-def test_citibike_target_window(*, sessions: sessionmaker[Session], seconds: int, matched: bool) -> None:
+def test_forecast_target_window(*, sessions: sessionmaker[Session], seconds: int, matched: bool) -> None:
     task_name = f"forecast-window-{uuid4()}"
-    policy = load_task(path="tasks/citibike/task.py").label_policy
+    policy = LabelPolicy(delay_seconds=3300, tolerance_seconds=600)
     origin = datetime.now(UTC).timestamp()
     with sessions.begin() as session:
         event_store.add_events(
@@ -904,7 +907,7 @@ def test_restart_preserves_learning_before_pause_and_skips_disabled_targets(
     from everbench import learner
 
     task_name = f"pause-recovery-{uuid4()}"
-    task = replace(load_task(path="tasks/citibike/task.py"), TASK_NAME=task_name)
+    task = replace(load_task(path="tasks/dummy/task.py"), TASK_NAME=task_name)
     cache = {}
     monkeypatch.setattr(learner, "CONFIG", replace(CONFIG, model_checkpoint_seconds=3600))
     with sessions.begin() as session:

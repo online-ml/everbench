@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import bindparam, delete, select, text
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from everbench import event_store
-from everbench.schema import ArchiveManifest
+from everbench.schema import JSON_TYPE, ArchiveManifest, BenchmarkEvent, BenchmarkLabel, UTCDateTime
 
 
 def task_archives(*, session: Session, task_name: str) -> list[ArchiveManifest]:
@@ -42,42 +42,46 @@ def archive_for_week(*, session: Session, task_name: str, event_date: date) -> A
 
 def latest_complete_archive_week(*, session: Session, task_name: str, cutoff: datetime) -> date | None:
     """Return the newest closed availability week whose rows are archived."""
-    return session.scalar(
-        text(
-            """SELECT max(manifest.event_date)
-                 FROM archive_manifest AS manifest
-                WHERE manifest.task_name = :task_name
-                  AND manifest.event_date + 7 <= CAST(:cutoff AS date)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM benchmark_events AS event
-                       WHERE event.task_name = manifest.task_name
-                         AND event.inserted_at >= (
-                             manifest.event_date::timestamp AT TIME ZONE 'UTC'
-                         )
-                         AND event.inserted_at < (
-                             (manifest.event_date + 7)::timestamp AT TIME ZONE 'UTC'
-                         )
-                  )"""
-        ),
-        {"task_name": task_name, "cutoff": cutoff},
+    dates = session.scalars(
+        select(ArchiveManifest.event_date)
+        .where(ArchiveManifest.task_name == task_name, ArchiveManifest.event_date <= cutoff.date() - timedelta(days=7))
+        .order_by(ArchiveManifest.event_date.desc())
     )
+    for week_start in dates:
+        start, end = _week_bounds(week_start=week_start)
+        remaining = session.scalar(
+            select(BenchmarkEvent.event_id)
+            .where(
+                BenchmarkEvent.task_name == task_name,
+                BenchmarkEvent.inserted_at >= start,
+                BenchmarkEvent.inserted_at < end,
+            )
+            .limit(1)
+        )
+        if remaining is None:
+            return week_start
+    return None
 
 
 def next_archive_week(*, session: Session, task_name: str, cutoff: datetime) -> date | None:
     """Return the oldest UTC availability week old enough to archive."""
-    return session.scalar(
-        text(
-            """SELECT date_trunc('week', event.inserted_at AT TIME ZONE 'UTC')::date
-               FROM benchmark_events AS event
-               WHERE event.task_name = :task_name AND event.inserted_at < :cutoff
-               ORDER BY event.inserted_at LIMIT 1"""
-        ),
-        {"task_name": task_name, "cutoff": cutoff},
+    earliest = session.scalar(
+        select(BenchmarkEvent.inserted_at)
+        .where(BenchmarkEvent.task_name == task_name, BenchmarkEvent.inserted_at < cutoff)
+        .order_by(BenchmarkEvent.inserted_at)
+        .limit(1)
     )
+    return earliest.date() - timedelta(days=earliest.weekday()) if earliest else None
+
+
+def _week_bounds(*, week_start: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(week_start, datetime.min.time(), tzinfo=UTC)
+    return start, start + timedelta(days=7)
 
 
 def archive_week_ready(*, session: Session, task_name: str, week_start: date) -> bool:
     """Return whether every event in a closed availability week is complete."""
+    start, end = _week_bounds(week_start=week_start)
     incomplete = session.scalar(
         text(
             f"""SELECT EXISTS (
@@ -85,12 +89,7 @@ def archive_week_ready(*, session: Session, task_name: str, week_start: date) ->
                      FROM benchmark_events AS event
                      LEFT JOIN benchmark_labels AS label USING (task_name, event_id)
                     WHERE event.task_name = :task_name
-                      AND event.inserted_at >= (
-                          CAST(:week_start AS date)::timestamp AT TIME ZONE 'UTC'
-                      )
-                      AND event.inserted_at < (
-                          (CAST(:week_start AS date) + 7)::timestamp AT TIME ZONE 'UTC'
-                      )
+                      AND event.inserted_at >= :start AND event.inserted_at < :end
                       AND (
                           label.event_id IS NULL OR EXISTS (
                               SELECT 1 FROM benchmark_models AS model
@@ -100,14 +99,15 @@ def archive_week_ready(*, session: Session, task_name: str, week_start: date) ->
                           )
                       )
                )"""
-        ),
-        {"task_name": task_name, "week_start": week_start},
+        ).bindparams(bindparam("start", type_=UTCDateTime()), bindparam("end", type_=UTCDateTime())),
+        {"task_name": task_name, "start": start, "end": end},
     )
     return not bool(incomplete)
 
 
 def archive_rows(*, session: Session, task_name: str, week_start: date) -> list[dict[str, Any]]:
     """Load one complete availability week in deterministic replay order."""
+    start, end = _week_bounds(week_start=week_start)
     rows = session.execute(
         text(
             f"""SELECT event.event_id, event.sequence, event.event_time, event.inserted_at, event.event,
@@ -115,8 +115,7 @@ def archive_rows(*, session: Session, task_name: str, week_start: date) -> list[
                FROM benchmark_events AS event
                JOIN benchmark_labels AS label USING (task_name, event_id)
                WHERE event.task_name = :task_name
-                 AND event.inserted_at >= (CAST(:week_start AS date)::timestamp AT TIME ZONE 'UTC')
-                 AND event.inserted_at < (CAST(:week_start AS date)::timestamp AT TIME ZONE 'UTC') + INTERVAL '7 days'
+                 AND event.inserted_at >= :start AND event.inserted_at < :end
                  AND NOT EXISTS (
                    SELECT 1 FROM benchmark_models AS model
                    WHERE model.task_name = event.task_name AND model.active
@@ -124,8 +123,16 @@ def archive_rows(*, session: Session, task_name: str, week_start: date) -> list[
                      AND {event_store._model_processing_pending_clause()}
                  )
                ORDER BY event.inserted_at, event.sequence"""
+        )
+        .bindparams(bindparam("start", type_=UTCDateTime()), bindparam("end", type_=UTCDateTime()))
+        .columns(
+            event=JSON_TYPE,
+            y=JSON_TYPE,
+            event_time=UTCDateTime(),
+            inserted_at=UTCDateTime(),
+            available_at=UTCDateTime(),
         ),
-        {"task_name": task_name, "week_start": week_start},
+        {"task_name": task_name, "start": start, "end": end},
     ).mappings()
     return [dict(row) for row in rows]
 
@@ -152,7 +159,7 @@ def record_archive(
             byte_size=byte_size,
             label_count=row_count if label_count is None else label_count,
         )
-        .on_conflict_do_nothing(constraint="archive_manifest_task_week_key")
+        .on_conflict_do_nothing(index_elements=["task_name", "event_date"])
         .returning(ArchiveManifest.content_sha256)
     )
     return inserted is not None
@@ -162,14 +169,11 @@ def purge_archived_events(*, session: Session, task_name: str, event_ids: list[s
     """Only call after a manifest was committed for a durable archive target."""
     if not event_ids:
         return
-    # Bind the IDs as one PostgreSQL array. Expanding a 100k-row archive batch
-    # into an IN clause exceeds PostgreSQL's 65,535 bind-parameter limit.
-    for table in ("benchmark_labels", "benchmark_events"):
+    for offset in range(0, len(event_ids), 500):
+        ids = event_ids[offset : offset + 500]
         session.execute(
-            text(
-                f"""DELETE FROM {table}
-                     WHERE task_name = :task_name
-                       AND event_id = ANY(CAST(:event_ids AS text[]))"""
-            ),
-            {"task_name": task_name, "event_ids": event_ids},
+            delete(BenchmarkLabel).where(BenchmarkLabel.task_name == task_name, BenchmarkLabel.event_id.in_(ids))
+        )
+        session.execute(
+            delete(BenchmarkEvent).where(BenchmarkEvent.task_name == task_name, BenchmarkEvent.event_id.in_(ids))
         )

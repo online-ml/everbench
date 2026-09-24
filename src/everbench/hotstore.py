@@ -9,7 +9,7 @@ from typing import Any
 
 
 class HotStore:
-    """A bounded, defensive read cache; Postgres remains the source of truth."""
+    """A bounded, defensive read cache; SQLite remains the source of truth."""
 
     def __init__(self, *, capacity: int, max_event_bytes: int | None = None):
         if capacity < 1:
@@ -36,7 +36,7 @@ class HotStore:
         try:
             encoded = json.dumps(event, separators=(",", ":")).encode()
         except (TypeError, ValueError):
-            # Postgres is still the authoritative fallback. Refusing an
+            # SQLite is still the authoritative fallback. Refusing an
             # unusual payload here is safer than keeping unbounded data.
             with self._lock:
                 self._bypasses += 1

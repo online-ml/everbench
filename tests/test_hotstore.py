@@ -18,7 +18,7 @@ def test_keeps_its_own_copy_of_an_event() -> None:
     assert hot.event(event_id="one") == {"nested": {"value": 1}}
 
 
-def test_only_caches_events_inserted_by_postgres() -> None:
+def test_only_caches_events_inserted_by_database() -> None:
     hot = HotStore(capacity=2)
     events = [
         Observation(event_id="existing", timestamp=1.0, payload={"value": "ignored"}),

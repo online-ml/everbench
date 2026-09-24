@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -14,7 +14,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
-    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -23,18 +22,61 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
-JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
+JSON_TYPE = JSON()
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """Return aware UTC datetimes despite SQLite's timezone-free storage."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:  # noqa: PLR0917 -- SQLAlchemy callback
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("database datetimes must include a timezone")
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:  # noqa: PLR0917 -- SQLAlchemy callback
+        return value.replace(tzinfo=UTC) if value is not None else None
 
 
 class Base(DeclarativeBase):
     pass
 
 
+class DatabaseLock(Base):
+    """A write in this table acquires SQLite's transaction-wide writer lock."""
+
+    __tablename__ = "database_locks"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+
+
+class DatabaseSequence(Base):
+    """Persistent sequence counters shared by all SQLite connections."""
+
+    __tablename__ = "database_sequences"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class DatabaseMigration(Base):
+    """Marks a successfully verified one-time storage import."""
+
+    __tablename__ = "database_migrations"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    completed_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+
+
 class TaskRegistration(Base):
-    """Known task names and exact counts of their live Postgres rows."""
+    """Known task names and exact counts of their live rows."""
 
     __tablename__ = "benchmark_tasks"
 
@@ -53,10 +95,10 @@ class BenchmarkEvent(Base):
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
-    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     event: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
-    inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    inserted_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class BenchmarkLabel(Base):
@@ -70,8 +112,8 @@ class BenchmarkLabel(Base):
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     y: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+    inserted_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class ReadyLabel(Base):
@@ -94,7 +136,7 @@ class ReadyLabel(Base):
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False, unique=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
     has_target: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
 
@@ -114,8 +156,8 @@ class LabelSchedule(Base):
 
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    target_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    target_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    due_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     entity_key: Mapped[str | None] = mapped_column(String)
 
 
@@ -149,9 +191,9 @@ class ModelEventState(Base):
     prediction: Mapped[Any | None] = mapped_column(JSON_TYPE)
     prediction_status: Mapped[str] = mapped_column(String, nullable=False)
     prediction_reason: Mapped[str | None] = mapped_column(Text)
-    predicted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    predicted_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    trained_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     training_skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
@@ -174,9 +216,7 @@ class MetricState(Base):
     predictions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     observations: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     values: Mapped[dict[str, float | None]] = mapped_column(JSON_TYPE, nullable=False, default=dict)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
 
 
 class ModelRegistration(Base):
@@ -192,15 +232,15 @@ class ModelRegistration(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
-    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    disabled_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    disabled_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
     error_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     skipped_predictions: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     skipped_labels: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     prediction_cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     label_cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class ModelArtifact(Base):
@@ -213,7 +253,7 @@ class ModelArtifact(Base):
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     signature: Mapped[str] = mapped_column(String(64), nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class ModelSnapshot(Base):
@@ -232,7 +272,7 @@ class ModelSnapshot(Base):
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     checkpoint_ready_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class AutoExperiment(Base):
@@ -275,12 +315,12 @@ class AutoExperiment(Base):
         String, ForeignKey("model_artifacts.artifact_id", ondelete="RESTRICT")
     )
     error: Mapped[str | None] = mapped_column(Text)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class ArchiveManifest(Base):
-    """Index entry for an immutable Parquet archive stored outside Postgres."""
+    """Index entry for an immutable Parquet archive stored outside SQLite."""
 
     __tablename__ = "archive_manifest"
     __table_args__ = (UniqueConstraint("task_name", "event_date", name="archive_manifest_task_week_key"),)
@@ -292,7 +332,7 @@ class ArchiveManifest(Base):
     row_count: Mapped[int] = mapped_column(Integer, nullable=False)
     label_count: Mapped[int | None] = mapped_column(Integer)
     byte_size: Mapped[int | None] = mapped_column(BigInteger)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
 
 
 class WorkerHeartbeat(Base):
@@ -303,9 +343,7 @@ class WorkerHeartbeat(Base):
     role: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text)
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())
 
 
 class StreamCursor(Base):
@@ -316,6 +354,4 @@ class StreamCursor(Base):
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     stream_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now(), onupdate=func.now())

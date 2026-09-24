@@ -7,16 +7,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from everbench import artifacts, event_store
-from everbench.db import advisory_key
+from everbench.db import lock_transaction
 from everbench.records import LabelledExample
 from everbench.schema import (
+    JSON_TYPE,
     AutoExperiment,
     BenchmarkEvent,
+    BenchmarkLabel,
     MetricState,
     ModelArtifact,
     ModelEventState,
@@ -148,10 +150,7 @@ def register_model(
 
 def lock_model_registrations(*, session: Session, task_name: str) -> None:
     """Serialize count-and-register operations for one task until transaction end."""
-    session.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_id)"),
-        {"lock_id": advisory_key(parts=("model-registration", task_name))},
-    )
+    lock_transaction(session=session, name=f"model-registration:{task_name}")
 
 
 def _delete_unreferenced_artifacts(*, session: Session, artifact_ids: set[str]) -> None:
@@ -412,21 +411,37 @@ def trained_examples_since_checkpoint(
 ) -> Iterator[LabelledExample]:
     """Stream committed learning not yet included in the saved model state."""
     rows = session.execute(
-        text(
-            """SELECT event.event_id, event.event, label.y
-           FROM benchmark_model_events AS state
-           JOIN benchmark_events AS event USING (task_name, event_id)
-           JOIN benchmark_labels AS label USING (task_name, event_id)
-           JOIN benchmark_ready_labels AS ready USING (task_name, event_id)
-           JOIN benchmark_models AS model USING (task_name, model_id)
-           WHERE state.task_name = :task AND state.model_id = :model
-             AND state.trained_at IS NOT NULL AND label.y <> 'null'::jsonb
-             AND NOT state.training_skipped
-             AND event.sequence >= model.start_sequence AND ready.sequence > :checkpoint
-           ORDER BY ready.sequence"""
-        ),
-        {"task": task_name, "model": model_id, "checkpoint": checkpoint_ready_sequence},
-        execution_options={"yield_per": 500},
+        select(BenchmarkEvent.event_id, BenchmarkEvent.event, BenchmarkLabel.y)
+        .join(
+            ModelEventState,
+            (ModelEventState.task_name == BenchmarkEvent.task_name)
+            & (ModelEventState.event_id == BenchmarkEvent.event_id),
+        )
+        .join(
+            BenchmarkLabel,
+            (BenchmarkLabel.task_name == BenchmarkEvent.task_name)
+            & (BenchmarkLabel.event_id == BenchmarkEvent.event_id),
+        )
+        .join(
+            ReadyLabel,
+            (ReadyLabel.task_name == BenchmarkEvent.task_name) & (ReadyLabel.event_id == BenchmarkEvent.event_id),
+        )
+        .join(
+            ModelRegistration,
+            (ModelRegistration.task_name == ModelEventState.task_name)
+            & (ModelRegistration.model_id == ModelEventState.model_id),
+        )
+        .where(
+            ModelEventState.task_name == task_name,
+            ModelEventState.model_id == model_id,
+            ModelEventState.trained_at.is_not(None),
+            BenchmarkLabel.y != JSON_TYPE.NULL,
+            ~ModelEventState.training_skipped,
+            BenchmarkEvent.sequence >= ModelRegistration.start_sequence,
+            ReadyLabel.sequence > checkpoint_ready_sequence,
+        )
+        .order_by(ReadyLabel.sequence)
+        .execution_options(yield_per=500)
     )
     for event_id, payload, target in rows:
         yield LabelledExample(event_id=event_id, payload=payload, target=target)
@@ -438,7 +453,7 @@ def save_pickle_snapshot(
     """Replace the operational checkpoint instead of retaining every batch.
 
     Historical model checkpoints belong in a deliberate archive policy, not in
-    the always-on Postgres path. Retaining just one snapshot is sufficient for
+    the always-on SQLite path. Retaining just one snapshot is sufficient for
     restart recovery and bounds database growth for large River models.
     """
     previous_artifact_id = session.scalar(

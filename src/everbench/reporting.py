@@ -5,12 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from everbench.auto import store as auto_store
 from everbench.auto.documentation import documented_source
-from everbench.schema import AutoExperiment, TaskRegistration, WorkerHeartbeat
+from everbench.schema import (
+    JSON_TYPE,
+    ArchiveManifest,
+    AutoExperiment,
+    BenchmarkEvent,
+    BenchmarkLabel,
+    TaskRegistration,
+    UTCDateTime,
+    WorkerHeartbeat,
+)
 
 
 def record_heartbeat(
@@ -53,22 +62,29 @@ def register_tasks(*, session: Session, task_names: list[str]) -> None:
 
 
 def task_stats(*, session: Session, task_name: str) -> dict[str, int]:
-    row = (
-        session.execute(
-            text(
-                """SELECT COALESCE(task.live_events, 0) + archived.row_count AS events,
-                      COALESCE(task.live_labels, 0) + archived.label_count AS labels
-                 FROM (SELECT COALESCE(SUM(row_count), 0) AS row_count,
-                              COALESCE(SUM(COALESCE(label_count, row_count)), 0) AS label_count
-                         FROM archive_manifest WHERE task_name = :task_name) AS archived
-                 LEFT JOIN benchmark_tasks AS task ON task.task_name = :task_name"""
-            ),
-            {"task_name": task_name},
-        )
-        .mappings()
-        .one()
+    live_events = session.scalar(
+        select(func.count()).select_from(BenchmarkEvent).where(BenchmarkEvent.task_name == task_name)
     )
-    return {"events": int(row["events"]), "labels": int(row["labels"])}
+    live_labels = session.scalar(
+        select(func.count())
+        .select_from(BenchmarkLabel)
+        .join(
+            BenchmarkEvent,
+            (BenchmarkEvent.task_name == BenchmarkLabel.task_name)
+            & (BenchmarkEvent.event_id == BenchmarkLabel.event_id),
+        )
+        .where(BenchmarkLabel.task_name == task_name, BenchmarkLabel.y != JSON_TYPE.NULL)
+    )
+    archived_events, archived_labels = session.execute(
+        select(
+            func.coalesce(func.sum(ArchiveManifest.row_count), 0),
+            func.coalesce(func.sum(func.coalesce(ArchiveManifest.label_count, ArchiveManifest.row_count)), 0),
+        ).where(ArchiveManifest.task_name == task_name)
+    ).one()
+    return {
+        "events": int(live_events or 0) + int(archived_events),
+        "labels": int(live_labels or 0) + int(archived_labels),
+    }
 
 
 def task_leaderboard(*, session: Session, task_name: str) -> list[dict[str, Any]]:
@@ -86,8 +102,8 @@ def task_leaderboard(*, session: Session, task_name: str) -> list[dict[str, Any]
                       model.created_at,
                       COALESCE(metric_state.predictions, 0) AS predictions,
                       COALESCE(metric_state.observations, 0) AS labels,
-                      COALESCE(metric_state.values, '{}'::jsonb) AS metrics,
-                      COALESCE(octet_length(snapshot_artifact.payload), octet_length(artifact.payload), 0) AS model_bytes
+                      COALESCE(metric_state."values", '{}') AS metrics,
+                      COALESCE(length(snapshot_artifact.payload), length(artifact.payload), 0) AS model_bytes
                FROM benchmark_models AS model
                LEFT JOIN benchmark_metric_state AS metric_state
                  ON metric_state.task_name = model.task_name AND metric_state.model_id = model.model_id
@@ -97,7 +113,7 @@ def task_leaderboard(*, session: Session, task_name: str) -> list[dict[str, Any]
                LEFT JOIN model_artifacts AS snapshot_artifact ON snapshot_artifact.artifact_id = snapshot.artifact_id
                WHERE model.task_name = :task_name AND model.active
                ORDER BY model.model_id"""
-        ),
+        ).columns(metrics=JSON_TYPE, created_at=UTCDateTime(), failed_at=UTCDateTime(), disabled_until=UTCDateTime()),
         {"task_name": task_name},
     ).mappings()
     return [dict(row) for row in rows]
@@ -120,7 +136,7 @@ def model_detail(*, session: Session, task_name: str, model_id: str) -> dict[str
                  FROM benchmark_models AS model
                  LEFT JOIN model_artifacts AS artifact ON artifact.artifact_id = model.artifact_id
                 WHERE model.task_name = :task_name AND model.model_id = :model_id AND model.active"""
-            ),
+            ).columns(artifact_metadata=JSON_TYPE, created_at=UTCDateTime()),
             {"task_name": task_name, "model_id": model_id},
         )
         .mappings()

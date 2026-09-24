@@ -122,7 +122,7 @@ def test_filtered_stream_messages_checkpoint_without_filling_the_ingest_batch() 
     assert state.value == "accepted-3"
 
 
-def test_upload_validation_uses_recent_postgres_labels_before_archives(*, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_validation_uses_recent_database_labels_before_archives(*, monkeypatch: pytest.MonkeyPatch) -> None:
     recent = [LabelledExample(event_id="one", payload={"x": 1.0}, target=1)] * 5
     archived = False
 

@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, time, timedelta
 from types import FrameType
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -140,7 +141,7 @@ def run_task(
                 if count:
                     logging.info("archived one weekly file with %d %s events", count, task.TASK_NAME)
             except Exception:
-                # Source rows remain in Postgres and a later cycle retries.
+                # Source rows remain in SQLite and a later cycle retries.
                 logging.exception("archiver cycle failed")
             stop.wait(CONFIG.archive_interval_seconds)
 
@@ -194,7 +195,26 @@ def run_task(
         _run_threads(stop=stop, failures=failures, threads=threads, failure_context="task runtime")
 
 
-def run_tasks(*, sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -> None:
+def _next_research_run(*, now: datetime) -> datetime:
+    days = (0 - now.weekday()) % 7
+    candidate = datetime.combine((now + timedelta(days=days)).date(), time(hour=1), tzinfo=UTC)
+    return candidate if candidate > now else candidate + timedelta(days=7)
+
+
+def _schedule_research(*, sessions: sessionmaker[Session], tasks: list[TaskDefinition], stop: threading.Event) -> None:
+    from everbench.auto.service import auto_worker
+
+    while not stop.is_set():
+        due = _next_research_run(now=datetime.now(UTC))
+        if stop.wait((due - datetime.now(UTC)).total_seconds()):
+            return
+        try:
+            auto_worker(sessions=sessions, tasks=tasks)
+        except Exception:
+            logging.exception("weekly research failed")
+
+
+def run_tasks(*, sessions: sessionmaker[Session], tasks: list[TaskDefinition], schedule_research: bool = False) -> None:
     """Run all task runtimes in one Railway worker process.
 
     One process lets each task keep its hot store in RAM, while the shared
@@ -219,5 +239,17 @@ def run_tasks(*, sessions: sessionmaker[Session], tasks: list[TaskDefinition]) -
     threads = [
         threading.Thread(target=run, kwargs={"task": task}, name=f"task-runtime-{task.TASK_NAME}") for task in tasks
     ]
+    if schedule_research:
+        threads.append(
+            threading.Thread(
+                target=_supervised(
+                    stop=stop,
+                    failures=failures,
+                    name="research-scheduler",
+                    target=lambda: _schedule_research(sessions=sessions, tasks=tasks, stop=stop),
+                ),
+                name="research-scheduler",
+            )
+        )
     with _shutdown_signals(stop=stop, enabled=True):
         _run_threads(stop=stop, failures=failures, threads=threads, failure_context="task runtime")

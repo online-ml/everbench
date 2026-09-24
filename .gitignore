@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 archives/
+*.db
+*.db-shm
+*.db-wal

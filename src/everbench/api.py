@@ -123,7 +123,7 @@ def multipart_json(*, name: str, default: dict[str, Any] | None = None) -> dict[
 
 
 def validation_examples(*, session: Session, task_name: str) -> list[LabelledExample]:
-    """Prefer fresh Postgres labels; archives make a durable fallback."""
+    """Prefer fresh SQLite labels; archives make a durable fallback."""
     examples = event_store.latest_labelled_examples(session=session, task_name=task_name, limit=5)
     if len(examples) < 5:
         examples = (

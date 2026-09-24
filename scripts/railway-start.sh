@@ -2,33 +2,42 @@
 
 set -eu
 
-# Railway starts the web and worker services independently. Run migrations in
-# the service network before either begins work; the command holds a Postgres
-# advisory lock, so concurrent starts cannot race.
+if [ "${EVERBENCH_SERVICE_ROLE:-combined}" != "combined" ]; then
+    echo "EVERBENCH_SERVICE_ROLE must be 'combined'" >&2
+    exit 2
+fi
+
+export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-10}"
 .venv/bin/everbench migrate
-# Space-separated task names let one worker serve several benchmarks.
+if [ "${EVERBENCH_IMPORT_POSTGRES:-0}" = "1" ]; then
+    .venv/bin/everbench import-postgres
+fi
+
 set --
-for task_name in ${EVERBENCH_TASK_NAMES:-${EVERBENCH_TASK_NAME:-wiki-liftwing}}; do
+for task_name in ${EVERBENCH_TASK_NAMES:-wiki-liftwing}; do
     set -- "$@" --task "$task_name"
 done
+.venv/bin/everbench register-tasks "$@"
 
-case "${EVERBENCH_SERVICE_ROLE:-web}" in
-    web)
-        .venv/bin/everbench register-tasks "$@"
-        export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-3}"
-        exec .venv/bin/gunicorn --bind "0.0.0.0:${PORT:-8000}" "everbench.api:create_app()"
-        ;;
-    worker)
-        .venv/bin/everbench register-tasks "$@"
-        export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-6}"
-        exec .venv/bin/everbench worker-all "$@"
-        ;;
-    researcher)
-        export EVERBENCH_DB_POOL_SIZE="${EVERBENCH_DB_POOL_SIZE:-2}"
-        exec .venv/bin/everbench auto-worker-all
-        ;;
-    *)
-        echo "EVERBENCH_SERVICE_ROLE must be 'web', 'worker', or 'researcher'" >&2
-        exit 2
-        ;;
-esac
+.venv/bin/everbench worker-all --schedule-research "$@" &
+worker_pid=$!
+.venv/bin/gunicorn --bind "0.0.0.0:${PORT:-8000}" "everbench.api:create_app()" &
+web_pid=$!
+
+terminate() {
+    trap - TERM INT
+    kill "$worker_pid" "$web_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
+    wait "$web_pid" 2>/dev/null || true
+    exit 0
+}
+trap terminate TERM INT
+
+while kill -0 "$worker_pid" 2>/dev/null && kill -0 "$web_pid" 2>/dev/null; do
+    sleep 2
+done
+echo "web or worker exited unexpectedly" >&2
+kill "$worker_pid" "$web_pid" 2>/dev/null || true
+wait "$worker_pid" 2>/dev/null || true
+wait "$web_pid" 2>/dev/null || true
+exit 1
