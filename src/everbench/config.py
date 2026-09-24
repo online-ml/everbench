@@ -24,7 +24,7 @@ class RuntimeConfig:
     learner_batch_size: int = 500
     learner_idle_seconds: float = 5.0
     heartbeat_seconds: float = 30.0
-    hot_event_capacity: int = 250_000
+    hot_event_capacity: int = 20_000
     hot_event_max_bytes: int = 512 * 1024
     shutdown_flush_seconds: float = 20.0
     # Minimum hold after a UTC week ends. The task's delayed-label window plus
