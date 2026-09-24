@@ -7,7 +7,7 @@ import logging
 from sqlalchemy import Engine, MetaData, func, select, text
 from sqlalchemy.dialects.sqlite import insert
 
-from everbench.schema import Base, BenchmarkEvent, DatabaseMigration, DatabaseSequence, ReadyLabel
+from everbench.schema import Base, DatabaseMigration, DatabaseSequence
 
 SKIPPED_TABLES = {"database_locks", "database_migrations", "database_sequences", "worker_heartbeats"}
 REMOVED_TASK = "citibike"
@@ -35,6 +35,48 @@ def _prune_artifacts(*, target: Engine) -> None:
         )
 
 
+def sync_sequence_floors(*, source: Engine, target: Engine) -> None:
+    """Keep new IDs above every old global ID and retained model checkpoint."""
+    metadata = MetaData()
+    metadata.reflect(
+        bind=source,
+        only=["benchmark_events", "benchmark_ready_labels", "benchmark_models", "model_snapshots", "auto_experiments"],
+    )
+    columns = (
+        (
+            "events",
+            ("benchmark_events", "sequence"),
+            ("benchmark_models", "start_sequence"),
+            ("benchmark_models", "prediction_cursor_sequence"),
+            ("auto_experiments", "comparison_end_sequence"),
+        ),
+        (
+            "ready_labels",
+            ("benchmark_ready_labels", "sequence"),
+            ("benchmark_models", "label_cursor_sequence"),
+            ("model_snapshots", "checkpoint_ready_sequence"),
+        ),
+    )
+    with source.connect() as connection:
+        floors = {
+            name: max(
+                int(connection.scalar(select(func.coalesce(func.max(metadata.tables[table].c[column]), 0))) or 0)
+                for table, column in references
+            )
+            for name, *references in columns
+        }
+    with target.begin() as connection:
+        for name, floor in floors.items():
+            if floor:
+                connection.execute(
+                    insert(DatabaseSequence)
+                    .values(name=name, value=floor)
+                    .on_conflict_do_update(
+                        index_elements=["name"], set_={"value": func.max(DatabaseSequence.value, floor)}
+                    )
+                )
+
+
 def copy_postgres_to_sqlite(*, source: Engine, target: Engine) -> dict[str, int]:
     """Copy one stopped Postgres snapshot, excluding the removed task.
 
@@ -52,7 +94,9 @@ def copy_postgres_to_sqlite(*, source: Engine, target: Engine) -> dict[str, int]
 
     copied: dict[str, int] = {}
     source_metadata = MetaData()
-    source_metadata.reflect(bind=source, only=[table.name for table in Base.metadata.sorted_tables if table.name not in SKIPPED_TABLES])
+    source_metadata.reflect(
+        bind=source, only=[table.name for table in Base.metadata.sorted_tables if table.name not in SKIPPED_TABLES]
+    )
     with source.connect().execution_options(stream_results=True) as source_connection:
         for table in Base.metadata.sorted_tables:
             if table.name in SKIPPED_TABLES:
@@ -69,11 +113,8 @@ def copy_postgres_to_sqlite(*, source: Engine, target: Engine) -> dict[str, int]
             logging.info("copied %s: %d rows", table.name, count)
 
     _prune_artifacts(target=target)
+    sync_sequence_floors(source=source, target=target)
     with target.begin() as connection:
-        for name, table in (("events", BenchmarkEvent), ("ready_labels", ReadyLabel)):
-            highest = connection.scalar(select(func.coalesce(func.max(table.sequence), 0)))
-            if highest:
-                connection.execute(insert(DatabaseSequence).values(name=name, value=highest))
         foreign_key_errors = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
         if foreign_key_errors:
             raise RuntimeError(f"SQLite has {len(foreign_key_errors)} foreign key errors")

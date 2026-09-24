@@ -175,13 +175,18 @@ def migrate() -> None:
 @click.option("--source-url", envvar="POSTGRES_SOURCE_URL", required=True, hide_input=True)
 def import_postgres(*, source_url: str) -> None:
     """Copy a stopped Postgres benchmark into an empty SQLite database."""
-    from everbench.sqlite_migration import copy_postgres_to_sqlite
+    from everbench.sqlite_migration import copy_postgres_to_sqlite, sync_sequence_floors
 
     target = make_engine()
     with Session(target) as session:
         if session.get(DatabaseMigration, "postgres-import") is not None:
-            click.echo("Postgres import already completed")
+            source = make_engine(url=source_url)
+            try:
+                sync_sequence_floors(source=source, target=target)
+            finally:
+                source.dispose()
             target.dispose()
+            click.echo("Postgres import already completed; sequence floors verified")
             return
     source = make_engine(url=source_url)
     try:

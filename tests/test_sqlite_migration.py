@@ -16,6 +16,7 @@ from everbench.schema import (
     BenchmarkEvent,
     BenchmarkLabel,
     DatabaseMigration,
+    DatabaseSequence,
     ModelArtifact,
     ModelRegistration,
     ModelSnapshot,
@@ -111,7 +112,7 @@ def test_postgres_copy_preserves_wiki_model_and_excludes_citibike(*, tmp_path) -
                         "model_id": wiki_model,
                         "owner": "test",
                         "artifact_id": wiki_artifact,
-                        "start_sequence": sequence,
+                        "start_sequence": sequence + 10,
                         "failure_count": 0,
                         "skipped_predictions": 0,
                         "skipped_labels": 0,
@@ -206,6 +207,12 @@ def test_postgres_copy_preserves_wiki_model_and_excludes_citibike(*, tmp_path) -
                 is None
             )
             assert connection.scalar(select(DatabaseMigration.name)) == "postgres-import"
+            assert (
+                connection.scalar(select(DatabaseSequence.value).where(DatabaseSequence.name == "events")) or 0
+            ) >= sequence + 10
+            assert (
+                connection.scalar(select(DatabaseSequence.value).where(DatabaseSequence.name == "ready_labels")) or 0
+            ) >= sequence + 1
     finally:
         with source.begin() as connection:
             for name, id_column, ids in (
