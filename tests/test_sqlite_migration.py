@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import MetaData, delete, select
+from sqlalchemy import MetaData, delete, null, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from everbench.db import make_engine
@@ -18,6 +18,7 @@ from everbench.schema import (
     DatabaseMigration,
     DatabaseSequence,
     ModelArtifact,
+    ModelEventState,
     ModelRegistration,
     ModelSnapshot,
     ReadyLabel,
@@ -153,6 +154,30 @@ def test_postgres_copy_preserves_wiki_model_and_excludes_citibike(*, tmp_path) -
                 ],
             )
             connection.execute(
+                tables["benchmark_model_events"]
+                .insert()
+                .values(
+                    task_name=wiki_task,
+                    event_id=wiki_event,
+                    model_id=wiki_model,
+                    prediction=null(),
+                    prediction_status="skipped",
+                    prediction_reason="test",
+                )
+            )
+            connection.execute(
+                tables["benchmark_model_events"]
+                .insert()
+                .values(
+                    task_name="citibike",
+                    event_id=bike_event,
+                    model_id=bike_model,
+                    prediction=0.5,
+                    prediction_status="predicted",
+                    prediction_reason=None,
+                )
+            )
+            connection.execute(
                 tables["auto_experiments"].insert(),
                 [
                     {
@@ -189,6 +214,14 @@ def test_postgres_copy_preserves_wiki_model_and_excludes_citibike(*, tmp_path) -
                 == wiki_model
             )
             assert (
+                connection.scalar(select(ModelEventState.prediction).where(ModelEventState.model_id == wiki_model))
+                is None
+            )
+            assert (
+                connection.scalar(select(ModelEventState.model_id).where(ModelEventState.model_id == bike_model))
+                is None
+            )
+            assert (
                 connection.scalar(select(ModelSnapshot.model_id).where(ModelSnapshot.model_id == wiki_model))
                 == wiki_model
             )
@@ -218,6 +251,7 @@ def test_postgres_copy_preserves_wiki_model_and_excludes_citibike(*, tmp_path) -
             for name, id_column, ids in (
                 ("auto_experiments", "experiment_id", [wiki_experiment]),
                 ("model_snapshots", "model_id", [wiki_model, bike_model]),
+                ("benchmark_model_events", "model_id", [wiki_model, bike_model]),
                 ("benchmark_models", "model_id", [wiki_model, bike_model]),
                 ("benchmark_ready_labels", "event_id", [wiki_event, bike_event]),
                 ("benchmark_labels", "event_id", [wiki_event, bike_event]),

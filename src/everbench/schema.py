@@ -26,6 +26,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 JSON_TYPE = JSON()
+NULLABLE_JSON_TYPE = JSON(none_as_null=True)
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -188,7 +189,7 @@ class ModelEventState(Base):
     task_name: Mapped[str] = mapped_column(String, primary_key=True)
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     model_id: Mapped[str] = mapped_column(String, primary_key=True)
-    prediction: Mapped[Any | None] = mapped_column(JSON_TYPE)
+    prediction: Mapped[Any | None] = mapped_column(NULLABLE_JSON_TYPE)
     prediction_status: Mapped[str] = mapped_column(String, nullable=False)
     prediction_reason: Mapped[str | None] = mapped_column(Text)
     predicted_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
@@ -303,9 +304,9 @@ class AutoExperiment(Base):
     researcher: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     hypothesis: Mapped[str | None] = mapped_column(Text)
-    proposal: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
-    research_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
-    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
+    proposal: Mapped[dict[str, Any] | None] = mapped_column(NULLABLE_JSON_TYPE)
+    research_summary: Mapped[dict[str, Any] | None] = mapped_column(NULLABLE_JSON_TYPE)
+    evaluation: Mapped[dict[str, Any] | None] = mapped_column(NULLABLE_JSON_TYPE)
     comparison_start_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     comparison_end_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     champion_artifact_id: Mapped[str] = mapped_column(
