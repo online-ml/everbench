@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from everbench.archive import archive_once, storage_configured
 from everbench.collectors import collect_source, maintain_resolutions
 from everbench.config import CONFIG
+from everbench.db import release_sqlite_file_cache
 from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
 from everbench.learner import learner
@@ -145,6 +146,17 @@ def run_task(
                 logging.exception("archiver cycle failed")
             stop.wait(CONFIG.archive_interval_seconds)
 
+    def reclaim_cache() -> None:
+        # SQLite's database pages accumulate in Linux's file cache, which
+        # Railway includes in billed memory even after queries finish.
+        while not stop.wait(3_600):
+            try:
+                engine = sessions.kw.get("bind")
+                if engine is not None:
+                    release_sqlite_file_cache(engine=engine)
+            except OSError:
+                logging.exception("could not release SQLite file cache")
+
     threads = [
         threading.Thread(
             target=_supervised(
@@ -181,6 +193,10 @@ def run_task(
             ),
             threading.Thread(
                 target=_supervised(stop=stop, failures=failures, name="archiver", target=archive), name="archiver"
+            ),
+            threading.Thread(
+                target=_supervised(stop=stop, failures=failures, name="cache-reclaimer", target=reclaim_cache),
+                name="cache-reclaimer",
             ),
         ]
     )

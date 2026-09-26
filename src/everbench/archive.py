@@ -13,9 +13,6 @@ from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any
 
-import boto3
-import pyarrow as pa
-import pyarrow.parquet as pq
 from sqlalchemy.orm import Session, sessionmaker
 
 from everbench import archive_store
@@ -41,6 +38,8 @@ def storage_configured() -> bool:
 
 @lru_cache
 def _s3_client():
+    import boto3
+
     if not CONFIG.s3_bucket_name or not CONFIG.s3_endpoint_url:
         raise RuntimeError("S3_BUCKET_NAME and S3_ENDPOINT_URL are required for R2 archive storage")
     return boto3.client(
@@ -172,6 +171,9 @@ def _record(*, row: dict) -> dict:
 
 
 def _publish_records(*, task_name: str, week_start: date, records: list[dict]) -> PublishedArchive:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     identity = {"task_name": task_name, "records": records}
     content_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     buffer = io.BytesIO()
@@ -243,6 +245,9 @@ def archive_once(*, sessions: sessionmaker[Session], task: TaskDefinition) -> in
 
 def latest_labelled_examples(*, manifests: list, limit: int = 5) -> list[LabelledExample]:
     """Read recent examples from the newest weekly archive files."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     examples: list[LabelledExample] = []
     for manifest in manifests:
         if len(examples) >= limit:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.sqlite import insert
@@ -41,6 +42,17 @@ def make_engine(*, url: str | None = None) -> Engine:
 
 def make_session_factory(*, url: str | None = None) -> sessionmaker[Session]:
     return sessionmaker(make_engine(url=url), expire_on_commit=False)
+
+
+def release_sqlite_file_cache(*, engine: Engine) -> None:
+    """Release clean database pages that Railway otherwise bills as memory."""
+    if not hasattr(os, "posix_fadvise") or engine.url.get_backend_name() != "sqlite":
+        return
+    database = engine.url.database
+    if not database or database == ":memory:":
+        return
+    with Path(database).open("rb") as source:
+        os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
 
 
 def lock_transaction(*, session: Session, name: str) -> None:

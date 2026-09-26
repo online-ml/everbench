@@ -11,10 +11,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-from river import stream
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ArchiveExample:
@@ -27,6 +23,9 @@ class ArchiveExample:
 
 
 def read_examples(*, path: Path | bytes) -> Iterator[ArchiveExample]:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     parquet = pq.ParquetFile(pa.BufferReader(path) if isinstance(path, bytes) else path)
     columns = ["event_id", "event_sequence", "payload_json", "label", "event_available_at", "label_available_at"]
     for batch in parquet.iter_batches(columns=columns):
@@ -67,6 +66,8 @@ def replay(
     resolution with an unavailable target from River's None question marker.
     River reveals due targets before the next observation, including time ties.
     """
+    from river import stream
+
     result = ReplayResult()
     predictions: dict[int, Any] = {}
     answers = stream.simulate_qa(
