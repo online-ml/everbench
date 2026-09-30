@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 from types import FrameType
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -38,6 +39,16 @@ def _log_failure(*, context: str, name: str, error: BaseException) -> None:
         name,
         exc_info=(type(error), error, error.__traceback__),
     )
+
+
+def _cgroup_memory() -> tuple[int, int, int, int] | None:
+    """Read Linux container memory totals, separating anonymous and file pages."""
+    try:
+        total = int(Path("/sys/fs/cgroup/memory.current").read_text())
+        stats = dict(line.split() for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines())
+        return total, int(stats["anon"]), int(stats["file"]), int(stats["inactive_file"])
+    except (OSError, KeyError, ValueError):
+        return None
 
 
 def _supervised(
@@ -141,6 +152,9 @@ def run_task(
                 count = archive_once(sessions=sessions, task=task)
                 if count:
                     logging.info("archived one weekly file with %d %s events", count, task.TASK_NAME)
+                    engine = sessions.kw.get("bind")
+                    if engine is not None:
+                        release_sqlite_file_cache(engine=engine)
             except Exception:
                 # Source rows remain in SQLite and a later cycle retries.
                 logging.exception("archiver cycle failed")
@@ -149,11 +163,27 @@ def run_task(
     def reclaim_cache() -> None:
         # SQLite's database pages accumulate in Linux's file cache, which
         # Railway includes in billed memory even after queries finish.
-        while not stop.wait(3_600):
+        while not stop.wait(300):
             try:
                 engine = sessions.kw.get("bind")
                 if engine is not None:
+                    before = _cgroup_memory()
                     release_sqlite_file_cache(engine=engine)
+                    after = _cgroup_memory()
+                    if before is not None and after is not None:
+                        database = engine.url.database
+                        wal_path = Path(database + "-wal") if database else None
+                        try:
+                            wal_bytes = wal_path.stat().st_size if wal_path is not None else 0
+                        except FileNotFoundError:
+                            wal_bytes = 0
+                        logging.info(
+                            "memory bytes before/after SQLite cache reclaim "
+                            "(total, anon, file, inactive_file): %s / %s; wal=%d",
+                            before,
+                            after,
+                            wal_bytes,
+                        )
             except OSError:
                 logging.exception("could not release SQLite file cache")
 

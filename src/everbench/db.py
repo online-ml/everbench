@@ -45,14 +45,19 @@ def make_session_factory(*, url: str | None = None) -> sessionmaker[Session]:
 
 
 def release_sqlite_file_cache(*, engine: Engine) -> None:
-    """Release clean database pages that Railway otherwise bills as memory."""
+    """Release clean SQLite database and WAL pages from the Linux file cache."""
     if not hasattr(os, "posix_fadvise") or engine.url.get_backend_name() != "sqlite":
         return
     database = engine.url.database
     if not database or database == ":memory:":
         return
-    with Path(database).open("rb") as source:
-        os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    for path in (Path(database), Path(database + "-wal")):
+        try:
+            with path.open("rb") as source:
+                os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except FileNotFoundError:
+            # SQLite may checkpoint and remove the WAL between the check and open.
+            continue
 
 
 def lock_transaction(*, session: Session, name: str) -> None:
