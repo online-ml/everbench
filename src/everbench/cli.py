@@ -58,6 +58,15 @@ def worker(*, task_file: str) -> None:
     run_task(sessions=make_session_factory(), task=load_task(path=task_file))
 
 
+@main.command("archive-once")
+@click.argument("task_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
+def archive_once_command(*, task_file: str) -> None:
+    """Archive one completed week in a short-lived process."""
+    from everbench.archive import archive_once
+
+    click.echo(archive_once(sessions=make_session_factory(), task=load_task(path=task_file)))
+
+
 @main.command("worker-all")
 @click.option(
     "--tasks-directory",

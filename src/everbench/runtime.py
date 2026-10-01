@@ -6,6 +6,8 @@ import json
 import logging
 import queue
 import signal
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -16,7 +18,7 @@ from types import FrameType
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from everbench.archive import archive_once, storage_configured
+from everbench.archive import storage_configured
 from everbench.collectors import collect_source, maintain_resolutions
 from everbench.config import CONFIG
 from everbench.db import release_sqlite_file_cache
@@ -149,7 +151,14 @@ def run_task(
             return
         while not stop.is_set():
             try:
-                count = archive_once(sessions=sessions, task=task)
+                # Archiving a full week can allocate much more memory than the
+                # live worker. Let the OS reclaim that memory when it finishes.
+                count = int(
+                    subprocess.check_output(
+                        [sys.executable, "-m", "everbench.cli", "archive-once", task.__file__],
+                        text=True,
+                    ).strip()
+                )
                 if count:
                     logging.info("archived one weekly file with %d %s events", count, task.TASK_NAME)
                     engine = sessions.kw.get("bind")
