@@ -1,5 +1,6 @@
 .venv/
 .env
+.env.production
 __pycache__/
 *.py[cod]
 .ruff_cache/
