@@ -1,0 +1,40 @@
+name: everbench
+
+services:
+  everbench:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: sqlite:////data/everbench.db
+      EVERBENCH_ARCHIVE_ROOT: /data/archives
+      PORT: "8000"
+    ports:
+      - "${EVERBENCH_BIND_ADDRESS:-127.0.0.1}:${EVERBENCH_PORT:-8000}:8000"
+    volumes:
+      - everbench-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  everbench-data:
+
