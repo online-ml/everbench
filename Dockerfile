@@ -33,4 +33,3 @@ EXPOSE 8000
 VOLUME ["/data"]
 
 CMD ["sh", "scripts/container-start.sh"]
-

@@ -87,4 +87,3 @@ docker compose --env-file .env.production exec everbench everbench auto status t
 ```
 
 The dashboard can run without autonomous research. To enable the weekly research job, add `EVERBENCH_SCHEDULE_RESEARCH=1` and `OPENAI_API_KEY` to `.env.production`, then recreate the container.
-

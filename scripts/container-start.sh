@@ -42,4 +42,3 @@ kill "$worker_pid" "$web_pid" 2>/dev/null || true
 wait "$worker_pid" 2>/dev/null || true
 wait "$web_pid" 2>/dev/null || true
 exit 1
-
