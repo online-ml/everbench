@@ -291,7 +291,16 @@ def test_task_stats_reflect_writes_in_the_same_session(*, sessions: sessionmaker
         assert reporting.task_stats(session=session, task_name=task_name) == {"events": 1, "labels": 0}
 
 
-def test_failed_model_does_not_block_healthy_model(*, sessions: sessionmaker[Session]) -> None:
+def test_failed_model_does_not_block_healthy_model(
+    *, sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from everbench import learner
+
+    monkeypatch.setattr(
+        learner,
+        "CONFIG",
+        replace(CONFIG, model_checkpoint_seconds=0.000001, model_retry_initial_seconds=3_600),
+    )
     task_name = f"model-test-{uuid4()}"
     task = SimpleNamespace(
         TASK_NAME=task_name,
