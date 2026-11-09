@@ -13,9 +13,7 @@ from tasks.wiki_liftwing.examples import liftwing_revertrisk
 
 def http_error(*, detail: str) -> HTTPError:
     body = BytesIO(json.dumps({"detail": detail}).encode())
-    return HTTPError(
-        "https://example.test", 422, "Unprocessable Entity", cast(Any, {}), cast(Any, body)
-    )
+    return HTTPError("https://example.test", 422, "Unprocessable Entity", cast(Any, {}), cast(Any, body))
 
 
 def test_expected_422_is_a_prediction_abstention(*, monkeypatch: pytest.MonkeyPatch) -> None:
