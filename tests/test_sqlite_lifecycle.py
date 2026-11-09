@@ -20,6 +20,7 @@ from everbench.config import CONFIG
 from everbench.db import make_session_factory
 from everbench.learner import learn_once
 from everbench.metrics import MetricTracker
+from everbench.models import PredictionUnavailable
 from everbench.records import Observation
 from everbench.schema import (
     ArchiveManifest,
@@ -45,6 +46,14 @@ class WorkingModel:
     def predict_one(self, *, event_id: str, event: dict[str, Any]) -> float:
         del event_id, event
         return 0.5
+
+
+class SelectiveModel:
+    def predict_one(self, *, event_id: str, event: dict[str, Any]) -> float:
+        del event
+        if event_id == "unavailable":
+            raise PredictionUnavailable("upstream could not score this event")
+        return 0.75
 
 
 class CountingModel:
@@ -364,6 +373,99 @@ def test_failed_model_does_not_block_healthy_model(
         assert event_store.completed_labelled_events(session=session, task_name=task_name, event_ids=["event"]) == [
             "event"
         ]
+
+
+def test_prediction_unavailable_skips_only_one_event(*, sessions: sessionmaker[Session]) -> None:
+    task_name = f"prediction-unavailable-{uuid4()}"
+    task = cast(
+        TaskDefinition,
+        SimpleNamespace(
+            TASK_NAME=task_name,
+            PROBLEM_TYPE="binary_classification",
+            METRICS=(metrics.Accuracy(),),
+            metric_inputs_for=None,
+        ),
+    )
+    with sessions.begin() as session:
+        payload = artifacts.dumps(model=SelectiveModel())
+        artifact = model_store.store_artifact(
+            session=session, payload=payload, signature=artifacts.sign(payload=payload), metadata={}
+        )
+        model_store.register_model(
+            session=session, task_name=task_name, model_id="selective", owner="test", artifact_id=artifact.artifact_id
+        )
+        event_store.add_events(
+            session=session,
+            task_name=task_name,
+            events=[
+                Observation(event_id=event_id, timestamp=datetime.now(UTC).timestamp(), payload={})
+                for event_id in ("unavailable", "predicted")
+            ],
+        )
+        results = learn_once(session=session, task=task)
+
+    assert [(result.predicted, result.skipped) for result in results] == [(1, 1)]
+    with sessions() as session:
+        registration = model_store.model_registration(session=session, task_name=task_name, model_id="selective")
+        assert registration is not None
+        assert registration.failure_count == 0
+        assert registration.error_count == 0
+        assert registration.skipped_predictions == 1
+        unavailable = session.get(
+            ModelEventState,
+            {"task_name": task_name, "event_id": "unavailable", "model_id": "selective"},
+        )
+        predicted = session.get(
+            ModelEventState,
+            {"task_name": task_name, "event_id": "predicted", "model_id": "selective"},
+        )
+        assert unavailable is not None and unavailable.prediction_status == "skipped"
+        assert unavailable.prediction_reason == "prediction-unavailable"
+        assert predicted is not None and predicted.prediction_status == "predicted"
+
+
+def test_learner_does_not_hold_writer_lock_during_prediction(
+    *, sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from everbench import learner
+
+    task_name = f"prediction-lock-{uuid4()}"
+    concurrent_task_name = f"concurrent-write-{uuid4()}"
+    task = cast(
+        TaskDefinition,
+        SimpleNamespace(
+            TASK_NAME=task_name,
+            PROBLEM_TYPE="binary_classification",
+            METRICS=(metrics.Accuracy(),),
+            metric_inputs_for=None,
+        ),
+    )
+    with sessions.begin() as session:
+        payload = artifacts.dumps(model=WorkingModel())
+        artifact = model_store.store_artifact(
+            session=session, payload=payload, signature=artifacts.sign(payload=payload), metadata={}
+        )
+        model_store.register_model(
+            session=session, task_name=task_name, model_id="model", owner="test", artifact_id=artifact.artifact_id
+        )
+        event_store.add_events(
+            session=session,
+            task_name=task_name,
+            events=[Observation(event_id="event", timestamp=datetime.now(UTC).timestamp(), payload={})],
+        )
+
+    def predict_during_concurrent_write(**_kwargs) -> float:
+        with sessions.begin() as concurrent_session:
+            reporting.register_tasks(session=concurrent_session, task_names=[concurrent_task_name])
+        return 0.5
+
+    monkeypatch.setattr(learner, "prediction_for", predict_during_concurrent_write)
+    learner.learner(sessions=sessions, task=task, once=True, heartbeat=False)
+
+    with sessions() as session:
+        assert session.get(TaskRegistration, concurrent_task_name) is not None
+        state = session.get(ModelEventState, {"task_name": task_name, "event_id": "event", "model_id": "model"})
+        assert state is not None and state.prediction_status == "predicted"
 
 
 def test_deleted_model_ids_start_fresh_registrations(*, sessions: sessionmaker[Session]) -> None:
