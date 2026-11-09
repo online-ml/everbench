@@ -8,6 +8,17 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from everbench.models import PredictionUnavailable
+
+
+def _error_detail(*, error: HTTPError) -> str:
+    try:
+        payload = json.load(error)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return str(error.reason)
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return detail if isinstance(detail, str) else json.dumps(payload, sort_keys=True)
+
 
 class LiftWingRevertRisk:
     """Return Lift Wing's probability that a Wikipedia revision is reverted."""
@@ -45,8 +56,16 @@ class LiftWingRevertRisk:
                     payload = json.load(response)
                 break
             except HTTPError as error:
+                if error.code == 422:
+                    detail = _error_detail(error=error)
+                    if detail.startswith("Could not make prediction for revisions"):
+                        raise PredictionUnavailable(f"Lift Wing could not score {event_id}: {detail}") from error
+                    raise RuntimeError(f"Lift Wing request for {event_id} failed with HTTP 422: {detail}") from error
                 if error.code not in {429, 500, 502, 503, 504} or attempt == self.max_attempts - 1:
-                    raise
+                    detail = _error_detail(error=error)
+                    raise RuntimeError(
+                        f"Lift Wing request for {event_id} failed with HTTP {error.code}: {detail}"
+                    ) from error
             except (TimeoutError, URLError):
                 if attempt == self.max_attempts - 1:
                     raise

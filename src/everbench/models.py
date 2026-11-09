@@ -11,6 +11,10 @@ from everbench.records import LabelledExample
 from everbench.tasks import TaskDefinition
 
 
+class PredictionUnavailable(Exception):
+    """Signal that a model cannot score one otherwise valid event."""
+
+
 def prediction_for(*, task: TaskDefinition, model: PickledModel, event_id: str, event: dict[str, Any]) -> Any:
     """Apply a task's prediction semantics to a model."""
     if task.PROBLEM_TYPE in {"binary_classification", "multiclass_classification"}:
@@ -93,14 +97,21 @@ def validate_model(*, task: TaskDefinition, candidate: PickledModel, examples: l
     if not examples:
         return 0
     tracker = MetricTracker.fresh(problem_type=task.PROBLEM_TYPE, prototypes=task.METRICS)
+    validated = 0
     for example in examples[-5:]:
-        prediction = prediction_for(task=task, model=candidate, event_id=example.event_id, event=example.payload)
+        try:
+            prediction = prediction_for(task=task, model=candidate, event_id=example.event_id, event=example.payload)
+        except PredictionUnavailable:
+            continue
         tracker.update(
             y_true=example.target,
             prediction=prediction,
             inputs_for=partial(metric_inputs_for, task=task),
         )
+        validated += 1
         if candidate.supports_learning:
             candidate.learn_one(event_id=example.event_id, event=example.payload, label=example.target)
+    if not validated:
+        raise ValueError("model did not produce a prediction for any validation example")
     tracker.values()
-    return min(len(examples), 5)
+    return validated

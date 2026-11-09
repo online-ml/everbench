@@ -18,7 +18,8 @@ from everbench.db import lock_transaction
 from everbench.heartbeat import Heartbeat
 from everbench.hotstore import HotStore
 from everbench.metrics import MetricTracker, metric_definition
-from everbench.models import PickledModel, metric_inputs_for, prediction_for
+from everbench.models import PickledModel, PredictionUnavailable, metric_inputs_for, prediction_for
+from everbench.records import PendingPrediction
 from everbench.tasks import TaskDefinition
 
 _learner_locks: dict[str, threading.Lock] = {}
@@ -57,12 +58,25 @@ class LearningResult:
     model_id: str
     trained: int = 0
     predicted: int = 0
+    skipped: int = 0
     evaluated: int = 0
     resolved: int = 0
 
     @property
     def processed(self) -> bool:
-        return bool(self.resolved or self.predicted)
+        return bool(self.resolved or self.predicted or self.skipped)
+
+
+@dataclass(slots=True, kw_only=True)
+class PreparedPredictions:
+    """Predictions computed without holding SQLite's writer lock."""
+
+    fingerprint: tuple[Any, ...]
+    cursor_sequence: int
+    pending: list[PendingPrediction]
+    predictions: dict[str, Any]
+    unavailable: dict[str, str]
+    error: Exception | None = None
 
 
 def _restore_uncheckpointed_learning(
@@ -157,7 +171,9 @@ def _active_models(
     return models
 
 
-def _predict_pending(*, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot) -> int:
+def _prepare_model_predictions(
+    *, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot: HotStore | None
+) -> PreparedPredictions:
     pending = event_store.events_after_cursor(
         session=session,
         task_name=task.TASK_NAME,
@@ -166,29 +182,89 @@ def _predict_pending(*, session: Session, task: TaskDefinition, registration, ca
         start_sequence=registration.start_sequence,
         limit=CONFIG.learner_batch_size,
     )
-    skipped = [row.event_id for row in pending if row.resolved and not row.has_state]
+    predictable = [row.event_id for row in pending if not row.resolved and not row.has_state]
+    payloads = _events(session=session, task_name=task.TASK_NAME, event_ids=predictable, hot=hot)
+    predictions = {}
+    unavailable = {}
+    for event_id in predictable:
+        try:
+            predictions[event_id] = prediction_for(
+                task=task, model=cached.model, event_id=event_id, event=payloads[event_id]
+            )
+        except PredictionUnavailable as error:
+            unavailable[event_id] = str(error)
+    return PreparedPredictions(
+        fingerprint=cached.fingerprint,
+        cursor_sequence=registration.prediction_cursor_sequence,
+        pending=pending,
+        predictions=predictions,
+        unavailable=unavailable,
+    )
+
+
+def prepare_pending_predictions(
+    *, session: Session, task: TaskDefinition, cache: dict[str, CachedModel], hot: HotStore | None = None
+) -> dict[str, PreparedPredictions]:
+    """Run model inference in a read transaction before the write phase."""
+    prepared = {}
+    for registration, cached in _active_models(session=session, task=task, cache=cache):
+        try:
+            batch = _prepare_model_predictions(
+                session=session, task=task, registration=registration, cached=cached, hot=hot
+            )
+        except Exception as error:
+            batch = PreparedPredictions(
+                fingerprint=cached.fingerprint,
+                cursor_sequence=registration.prediction_cursor_sequence,
+                pending=[],
+                predictions={},
+                unavailable={},
+                error=error,
+            )
+        prepared[registration.model_id] = batch
+    return prepared
+
+
+def _persist_predictions(
+    *, session: Session, task: TaskDefinition, registration, cached: CachedModel, prepared: PreparedPredictions
+) -> tuple[int, int]:
+    if prepared.error is not None:
+        raise prepared.error
+    skipped = [row.event_id for row in prepared.pending if row.resolved and not row.has_state]
     event_store.add_prediction_skips(
         session=session, task_name=task.TASK_NAME, model_id=registration.model_id, event_ids=skipped
     )
-    predictable = [row.event_id for row in pending if not row.resolved and not row.has_state]
-    payloads = _events(session=session, task_name=task.TASK_NAME, event_ids=predictable, hot=hot)
-    predictions = {
-        identifier: prediction_for(task=task, model=cached.model, event_id=identifier, event=payloads[identifier])
-        for identifier in predictable
-    }
+    unavailable = event_store.add_prediction_skips(
+        session=session,
+        task_name=task.TASK_NAME,
+        model_id=registration.model_id,
+        event_ids=list(prepared.unavailable),
+        reason="prediction-unavailable",
+    )
+    for event_id in unavailable:
+        logging.warning(
+            "model %s skipped prediction for %s: %s",
+            registration.model_id,
+            event_id,
+            prepared.unavailable[event_id],
+        )
+    registration.skipped_predictions += len(unavailable)
     inserted = set(
         event_store.add_predictions(
-            session=session, task_name=task.TASK_NAME, model_id=registration.model_id, predictions=predictions
+            session=session,
+            task_name=task.TASK_NAME,
+            model_id=registration.model_id,
+            predictions=prepared.predictions,
         )
     )
-    raced = [identifier for identifier in predictable if identifier not in inserted]
+    raced = [event_id for event_id in prepared.predictions if event_id not in inserted]
     event_store.add_prediction_skips(
         session=session, task_name=task.TASK_NAME, model_id=registration.model_id, event_ids=raced
     )
     cached.tracker.predictions += len(inserted)
-    if pending:
-        registration.prediction_cursor_sequence = pending[-1].sequence
-    return len(inserted)
+    if prepared.pending:
+        registration.prediction_cursor_sequence = prepared.pending[-1].sequence
+    return len(inserted), len(unavailable)
 
 
 def _process_resolutions(
@@ -263,12 +339,24 @@ def _checkpoint(*, session: Session, task: TaskDefinition, cached: CachedModel, 
 
 
 def _learn_model(
-    *, session: Session, task: TaskDefinition, registration, cached: CachedModel, hot: HotStore | None
+    *,
+    session: Session,
+    task: TaskDefinition,
+    registration,
+    cached: CachedModel,
+    hot: HotStore | None,
+    prepared: PreparedPredictions | None = None,
 ) -> LearningResult:
     """Predict, resolve, and checkpoint within the caller's savepoint."""
-    predicted = _predict_pending(session=session, task=task, registration=registration, cached=cached, hot=hot)
+    prepared = prepared or _prepare_model_predictions(
+        session=session, task=task, registration=registration, cached=cached, hot=hot
+    )
+    predicted, skipped = _persist_predictions(
+        session=session, task=task, registration=registration, cached=cached, prepared=prepared
+    )
     result = _process_resolutions(session=session, task=task, registration=registration, cached=cached, hot=hot)
     result.predicted = predicted
+    result.skipped = skipped
     if result.processed:
         tracker = cached.tracker
         model_store.save_metric_state(
@@ -293,10 +381,11 @@ def learn_once(
     cache: dict[str, CachedModel] | None = None,
     hot: HotStore | None = None,
     completed_hot_events: list[str] | None = None,
+    prepared_predictions: dict[str, PreparedPredictions] | None = None,
 ) -> list[LearningResult]:
-    # Claim SQLite's writer slot before loading models or reading cursors.
-    # A read transaction upgraded after a collector commits fails with
-    # SQLITE_BUSY_SNAPSHOT even when busy_timeout is configured.
+    # Claim SQLite's writer slot before re-reading and changing durable state.
+    # Production inference runs in an earlier read transaction, which is
+    # closed instead of upgraded after a collector may have committed.
     lock_transaction(session=session, name=f"learner:{task.TASK_NAME}")
     cache = cache if cache is not None else {}
     results = []
@@ -308,9 +397,25 @@ def learn_once(
         )
         initially_disabled_model_ids.add(registration.model_id)
     for registration, cached in _active_models(session=session, task=task, cache=cache):
+        prepared = prepared_predictions.get(registration.model_id) if prepared_predictions is not None else None
+        if prepared_predictions is not None and (
+            prepared is None
+            or prepared.fingerprint != cached.fingerprint
+            or prepared.cursor_sequence != registration.prediction_cursor_sequence
+        ):
+            # The model or its cursor changed after inference. Re-read it next
+            # cycle instead of running arbitrary model code under the writer lock.
+            continue
         try:
             with session.begin_nested():
-                result = _learn_model(session=session, task=task, registration=registration, cached=cached, hot=hot)
+                result = _learn_model(
+                    session=session,
+                    task=task,
+                    registration=registration,
+                    cached=cached,
+                    hot=hot,
+                    prepared=prepared,
+                )
         except Exception as error:
             cache.pop(registration.model_id, None)
             retry_at = model_store.record_model_failure(
@@ -364,8 +469,19 @@ def learner(
                 while not stop.is_set():
                     try:
                         completed_hot_events: list[str] = []
+                        prepared = prepare_pending_predictions(session=session, task=task, cache=models, hot=hot)
+                        # End the read transaction before claiming SQLite's
+                        # single writer slot. Inference may include slow HTTP
+                        # requests made by scoring-only models.
+                        session.commit()
+                        session.expire_all()
                         results = learn_once(
-                            session=session, task=task, cache=models, hot=hot, completed_hot_events=completed_hot_events
+                            session=session,
+                            task=task,
+                            cache=models,
+                            hot=hot,
+                            completed_hot_events=completed_hot_events,
+                            prepared_predictions=prepared,
                         )
                         session.commit()
                         if hot is not None:
@@ -373,10 +489,11 @@ def learner(
                         for result in results:
                             if result.processed:
                                 logging.info(
-                                    "%s: trained=%d predicted=%d evaluated=%d",
+                                    "%s: trained=%d predicted=%d skipped=%d evaluated=%d",
                                     result.model_id,
                                     result.trained,
                                     result.predicted,
+                                    result.skipped,
                                     result.evaluated,
                                 )
                     except Exception:
